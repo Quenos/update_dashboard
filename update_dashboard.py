@@ -13,6 +13,7 @@ from account import Account
 from market_data import MarketData
 from session import ApplicationSession
 from sheets import get_row_data, get_workbook, insert_row_data
+from config import LOG_LEVEL, GREEK_POLL_INTERVAL
 from tastytrade.instruments import FutureOption, Option
 from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType
@@ -20,25 +21,20 @@ from tastytrade.session import Session
 
 
 # Configure logging
-logging.basicConfig(filename='update_dashboard.log', level=logging.ERROR,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(
+    filename='update_dashboard.log',
+    level=getattr(logging, LOG_LEVEL, logging.ERROR),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
-# Ensure root logger is set to ERROR level
-logging.getLogger().setLevel(logging.ERROR)
+logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.ERROR))
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.ERROR))
 
-try:
-    market_data = MarketData()
-    market_data.start_streamer()
-except Exception as e:
-    logger.error(f"Failed to initialize MarketData: {str(e)}")
-    raise
-
-GREEK_POLL_INTERVAL = 5  # seconds
+market_data: MarketData | None = None
 SPY_SYMBOL = 'SPY'
 
 
@@ -278,7 +274,7 @@ def get_greeks(symbol_map: List[Dict[str, Any]]) -> Dict[str, Any]:
         symbols = [symbol for symbol in symbols
                    if symbol not in [greek.event_symbol for greek in greeks]]
         time.sleep(GREEK_POLL_INTERVAL)
-        print(symbols)
+        logger.debug(f"Waiting for greeks: {symbols}")
     return {obj.event_symbol: obj for obj in greeks}
 
 
@@ -411,7 +407,7 @@ def is_same_date(date_str1: str, date_str2: str) -> bool:
         date2 = parse_date(date_str2)
         return date1.date() == date2.date()
     except ValueError as e:
-        print(f"Error comparing dates: {e}")
+        logger.error(f"Error comparing dates: {e}")
         return False
 
 
@@ -464,11 +460,18 @@ def is_closed_today():
     return datetime.now().date() in holidays.date
 
 
-if __name__ == "__main__":
+def main() -> None:
+    global market_data
     try:
+        market_data = MarketData()
+        market_data.start_streamer()
         if not is_closed_today():
             update_dashboard()
         else:
             logging.info('Today the exchanges are closed')
     except Exception as e:
         logging.error(f"Unhandled exception in main: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    main()

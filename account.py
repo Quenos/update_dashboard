@@ -1,5 +1,6 @@
 from tastytrade import Account as ac
 import logging
+from config import ACCOUNT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +13,12 @@ class Account:
         return cls._instance
 
     def __init__(self, session):
-        if not hasattr(self, 'initialized'):  # Check if it's the first time __init__ is called
+        if not hasattr(self, 'initialized'):
+            if not ACCOUNT_ID:
+                raise ValueError("TT_ACCOUNT_ID environment variable not set")
             try:
-                self._account = ac.get(session, '5WV52737')
-                self.initialized = True  # Mark as initialized
+                self._account = ac.get(session, ACCOUNT_ID)
+                self.initialized = True
             except Exception as e:
                 logger.error(f"Failed to initialize Account: {str(e)}")
                 raise

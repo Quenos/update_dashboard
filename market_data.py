@@ -1,5 +1,4 @@
 import asyncio
-import time
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import Any, ClassVar, Dict, List
@@ -71,7 +70,6 @@ class MarketData():
 
     def stop_streamer(self) -> None:
         self._stop_streaming = True
-        time.sleep(5)
         self._thread_runs = False
 
     def _subscribe_symbol(self, event_type: EventType, symbols: List[str]) -> None:
@@ -79,7 +77,6 @@ class MarketData():
         if new_symbols:
             self._new_symbols[event_type] = new_symbols
             self._subscribed_symbols[event_type] = list(set(self._subscribed_symbols[event_type]) | set(symbols))
-            time.sleep(5)
 
     def _get_events(self, event_type: EventType, symbols: List[str]) -> List[Greeks] | List[Trade] | List[Quote] | None:
         market_data = list(self._cached_events[event_type].values())
