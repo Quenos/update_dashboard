@@ -1,0 +1,298 @@
+{
+    "STRATEGIES": {
+        "LT112": {
+            "NAME": "LT112",
+            "DESCRIPTION": "120 DTE. PUT DEBIT SPREAD AND 2 NAKED PUTS",
+            "DIRECTION": "SHORT",
+            "TARGET_CREDIT": {
+                "/ES": "24",
+                "/MES": "24"
+            },
+            "PARTS": {
+                "NAME": "PDS",
+                "COUNT": "2",
+                "PART1": {
+                    "LEGS": {
+                        "COUNT": "2",
+                        "LEG1": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "LONG",
+                            "QTY": "1",
+                            "DTE": "120",
+                            "STRIKE_POSITIONING_TYPE": "DELTA",
+                            "VALUES": [
+                                {"UNDERLYING": "ALL", "VALUE": "0.25"}
+                            ]
+                        },
+                        "LEG2": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "SHORT",
+                            "QTY": "1",
+                            "DTE": "120",
+                            "STRIKE_POSITIONING_TYPE": "WIDTH",
+                            "VALUES": [
+                                {"UNDERLYING": "ALL", "VALUE": "50"}
+                            ]
+                        }
+                    }
+                },
+                "PART2": {
+                    "NAME": "NP",
+                    "LEGS": {
+                        "COUNT": "1",
+                        "LEG1": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "SHORT",
+                            "QTY": "2",
+                            "DTE": "120",
+                            "STRIKE_POSITIONING_TYPE": "DELTA",
+                            "VALUES": [
+                                {"UNDERLYING": "ALL", "VALUE": "0.05"}
+                            ]
+                        }          
+                    }      
+                }
+            }
+        },
+        "STRANGLE": {
+            "NAME": "STRANGLE",
+            "DESCRIPTION": "90 DTE. Strangle",
+            "DIRECTION": "SHORT",
+            "TARGET_CREDIT": {
+                "/ES": "120",
+                "/MES": "120",
+                "/HG": "560",
+                "/CL": "820",
+                "/ZB": "470",
+                "/6A": "160",
+                "/6E": "210"
+            },
+            "PARTS": {
+                "COUNT": "1",
+                "PART1": {
+                    "NAME": "STRANGLE",
+                    "SL": {
+                        "COUNT": "1",
+                        "RULE1": "2"
+                    },
+                    "PT": {
+                        "COUNT": "1",
+                        "RULE1": "0.5"
+                    },
+                    "LEGS": {
+                        "COUNT": "2",
+                        "LEG1": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "SHORT",
+                            "QTY": "1",
+                            "DTE": "90",
+                            "STRIKE_POSITIONING_TYPE": "DELTA",
+                            "VALUES": [
+                                {"UNDERLYING": "ALL", "VALUE": "0.06"}
+                            ]
+                        },
+                        "LEG2": {
+                            "TYPE": "CALL",
+                            "DIRECTION": "SHORT",
+                            "QTY": "1",
+                            "DTE": "90",
+                            "STRIKE_POSITIONING_TYPE": "DELTA",
+                            "VALUES": [
+                                {"UNDERLYING": "ALL", "VALUE": "0.07"}
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "HEDGE": {
+            "NAME": "HEDGE",
+            "DESCRIPTION": "Long Put, at approx. 5 delta",
+            "DIRECTION": "LONG",
+            "TARGET_CREDIT": {
+                "/MES": "0"
+            },
+            "PARTS": {
+                "COUNT": "1",
+                "PART1": {
+                    "NAME": "HEDGE",
+                    "SL": {
+                        "COUNT": "1",
+                        "RULE1": "0"
+                    },
+                    "PT": {
+                        "COUNT": "1",
+                        "RULE1": "400"
+                    },
+                    "LEGS": {
+                        "COUNT": "1",
+                        "LEG1": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "LONG",
+                            "QTY": "1",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DELTA",
+                            "VALUES": [
+                                {"UNDERLYING": "/MES", "VALUE": "0.05"}
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "NP": {
+            "NAME": "NAKED PUT",
+            "DIRECTION": "Uncovered short put",
+            "TARGET_CREDIT": {
+                "/ES": "85",
+                "/MES": "85"
+            },
+            "PARTS": {
+                "COUNT": "1",
+                "PART1": {
+                    "NAME": "NAKED PUT",
+                    "SL": {
+                        "COUNT": "1",
+                        "RULE1": "3"
+                    },
+                    "PT": {
+                        "COUNT": "1",
+                        "RULE1": "0.4"
+                    },
+                    "LEGS": {
+                        "COUNT": "1",
+                        "LEG1": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "SHORT",
+                            "QTY": "1",
+                            "DTE": "120",
+                            "STRIKE_POSITIONING_TYPE": "DELTA",
+                            "VALUES": [
+                                {"UNDERLYING": "ALL", "VALUE": "0.05"}
+                            ]
+                       }
+                    }
+                }
+            }
+        },
+        "PUT_BUTTERFLY": {
+            "NAME": "PUT BUTTERFLY",
+            "DESCRIPTION": "60 DTE. Butterfly",
+            "DIRECTION": "LONG",
+            "TARGET_DEBIT": {
+                "IWM": "0.60",
+                "RUT": "6.00"
+            },
+            "PARTS": {
+                "COUNT": "1",
+                "PART1": {
+                    "NAME": "PUT BUTTERFLY",
+                    "SL": {
+                        "COUNT": "1",
+                        "RULE1": "0.3"
+                    },
+                    "PT": {
+                        "COUNT": "1",
+                        "RULE1": "0.3"
+                    },
+                    "LEGS": {
+                        "COUNT": "3",
+                        "LEG1": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "LONG",
+                            "QTY": "1",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DISTANCE FROM UNDERLYING",
+                            "VALUES": [
+                                {"UNDERLYING": "IWM", "VALUE": "3"},
+                                {"UNDERLYING": "RUT", "VALUE": "30"}
+                            ]
+                        },
+                        "LEG2": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "SHORT",
+                            "QTY": "2",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DISTANCE FROM UNDERLYING",
+                            "VALUES": [
+                                {"UNDERLYING": "IWM", "VALUE": "-2"},
+                                {"UNDERLYING": "RUT", "VALUE": "-20"}
+                            ]
+                        },
+                        "LEG3": {
+                            "TYPE": "PUT",
+                            "DIRECTION": "LONG",
+                            "QTY": "1",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DISTANCE FROM UNDERLYING",
+                            "VALUES": [
+                                {"UNDERLYING": "IWM", "VALUE": "-7"},
+                                {"UNDERLYING": "RUT", "VALUE": "-70"}
+                            ]
+                        }                   
+                    }
+                }
+            }
+        },
+        "CALL_BUTTERFLY": {
+            "NAME": "CALL BUTTERFLY",
+            "DESCRIPTION": "60 DTE. Butterfly",
+            "DIRECTION": "LONG",
+            "TARGET_DEBIT": {
+                "IWM": "0.60",
+                "RUT": "6.00"
+            },
+            "PARTS": {
+                "COUNT": "1",
+                "PART1": {
+                    "NAME": "CALL BUTTERFLY",
+                    "SL": {
+                        "COUNT": "1",
+                        "RULE1": "0.3"
+                    },
+                    "PT": {
+                        "COUNT": "1",
+                        "RULE1": "0.3"
+                    },
+                    "LEGS": {
+                        "COUNT": "3",
+                        "LEG1": {
+                            "TYPE": "CALL",
+                            "DIRECTION": "LONG",
+                            "QTY": "1",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DISTANCE FROM UNDERLYING",
+                            "VALUES": [
+                                {"UNDERLYING": "IWM", "VALUE": "-3"},
+                                {"UNDERLYING": "RUT", "VALUE": "-30"}
+                            ]
+                        },
+                        "LEG2": {
+                            "TYPE": "CALL",
+                            "DIRECTION": "SHORT",
+                            "QTY": "2",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DISTANCE FROM UNDERLYING",
+                            "VALUES": [
+                                {"UNDERLYING": "IWM", "VALUE": "2"},
+                                {"UNDERLYING": "RUT", "VALUE": "20"}
+                            ]
+                        },
+                        "LEG3": {
+                            "TYPE": "CALL",
+                            "DIRECTION": "LONG",
+                            "QTY": "1",
+                            "DTE": "60",
+                            "STRIKE_POSITIONING_TYPE": "DISTANCE FROM UNDERLYING",
+                            "VALUES": [
+                                {"UNDERLYING": "IWM", "VALUE": "7"},
+                                {"UNDERLYING": "RUT", "VALUE": "70"}
+                            ]
+                        }                   
+                    }
+                }
+            }
+        }
+
+    }
+}
