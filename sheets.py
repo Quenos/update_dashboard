@@ -1,6 +1,4 @@
 import re
-from time import sleep
-
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -18,7 +16,8 @@ def get_workbook():
 
     creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
     client = gspread.authorize(creds)
-    return client.open_by_url("https://docs.google.com/spreadsheets/d/1A528mC08exsLG9tXSoVhF-vZsuRGwspOxRpEhPNwbpE/edit?usp=sharing")
+    from config import SPREADSHEET_URL
+    return client.open_by_url(SPREADSHEET_URL)
 
 
 def get_row_data(worksheet, row: int, offset: int) -> list[str]:
@@ -54,7 +53,8 @@ def copy_format(source_sheet: str, destination_sheet: str):
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
     service = build('sheets', 'v4', credentials=creds)
-    spreadsheet_id = '1A528mC08exsLG9tXSoVhF-vZsuRGwspOxRpEhPNwbpE'
+    from config import SPREADSHEET_ID
+    spreadsheet_id = SPREADSHEET_ID
 
     spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     sheets = spreadsheet.get('sheets', '')
@@ -63,50 +63,38 @@ def copy_format(source_sheet: str, destination_sheet: str):
     destination_sheet_id = [sheet['properties']['sheetId'] for sheet in sheets if sheet['properties']['title'] == destination_sheet][0]
     
     request = {
-    "requests": [
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": destination_sheet_id,  # Adjust if using a different sheet
-                    "startRowIndex": 4,  # 5th row (0-based index)
-                    "endRowIndex": 5   # Exclusive, thus only the 5th row is affected
-                },
-                "cell": {
-                    "userEnteredFormat": {}
-                },
-                "fields": "userEnteredFormat"
-            }
-        }
-    ]
-}
-
-    # Send the request to the Sheets API
-    response = service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body=request).execute()
-
-    request = {
-            "requests": [
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": destination_sheet_id,
-                            "startRowIndex": 4,
-                            "endRowIndex": 5,
-                            "startColumnIndex": 0,
-                            "endColumnIndex": 1
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "numberFormat": {
-                                    "type": "DATE",
-                                    "pattern": "m/d/y"
-                                }
+        "requests": [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": destination_sheet_id,
+                        "startRowIndex": 4,
+                        "endRowIndex": 5
+                    },
+                    "cell": {"userEnteredFormat": {}},
+                    "fields": "userEnteredFormat"
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": destination_sheet_id,
+                        "startRowIndex": 4,
+                        "endRowIndex": 5,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 1
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "numberFormat": {
+                                "type": "DATE",
+                                "pattern": "m/d/y"
                             }
-                        },
-                        "fields": "userEnteredFormat.numberFormat"
-                    }
-                },
+                        }
+                    },
+                    "fields": "userEnteredFormat.numberFormat"
+                }
+            },
             {
                 "repeatCell": {
                     "range": {
@@ -126,14 +114,14 @@ def copy_format(source_sheet: str, destination_sheet: str):
                     },
                     "fields": "userEnteredFormat.numberFormat"
                 }
-            }            
-            ]
-        }
+            }
+        ]
+    }
 
-    # Send the request to the Sheets API
     response = service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
-        body=request).execute()
+        body=request
+    ).execute()
 
 
 if __name__ == '__main__':

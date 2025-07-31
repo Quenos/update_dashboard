@@ -1,8 +1,8 @@
 import logging
-import os
+from datetime import datetime, timedelta
 
-from dotenv import load_dotenv
 from tastytrade import OAuthSession
+from config import TT_API_CLIENT_SECRET, TT_REFRESH_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +14,11 @@ class ApplicationSession:
 
     def __init__(self) -> None:
         try:
-            load_dotenv()
-
-            TT_API_CLIENT_SECRET = os.getenv('TT_API_CLIENT_SECRET')
-            TT_REFRESH_TOKEN = os.getenv('TT_REFRESH_TOKEN')
+            if not TT_API_CLIENT_SECRET or not TT_REFRESH_TOKEN:
+                raise ValueError("API credentials not configured")
             self._session = OAuthSession(TT_API_CLIENT_SECRET, TT_REFRESH_TOKEN)
-            self.initialized = True  # Mark as initialized
+            self._last_refresh = datetime.utcnow()
+            self.initialized = True
         except Exception as e:
             logger.error(f"Error initializing ApplicationSession: {str(e)}")
             raise
@@ -34,5 +33,7 @@ class ApplicationSession:
         """
         if not hasattr(self, '_session'):
             raise AttributeError("Session not initialized")
-        self._session.refresh()
+        if datetime.utcnow() - self._last_refresh > timedelta(minutes=30):
+            self._session.refresh()
+            self._last_refresh = datetime.utcnow()
         return self._session
