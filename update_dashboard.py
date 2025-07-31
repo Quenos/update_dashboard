@@ -1,5 +1,6 @@
 import json
 import logging
+import logging.handlers
 import re
 import time
 from datetime import datetime
@@ -21,18 +22,64 @@ from tastytrade.session import Session
 
 
 # Configure logging
-logging.basicConfig(
-    filename='update_dashboard.log',
-    level=getattr(logging, LOG_LEVEL, logging.ERROR),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+log_level = getattr(logging, LOG_LEVEL, logging.INFO)
+
+# Configure rotating file handler (new log file each run, keep 5 backups)
+file_handler = logging.handlers.RotatingFileHandler(
+    'update_dashboard.log',
+    maxBytes=1024*1024*10,  # 10MB max size (but we'll rotate on each run)
+    backupCount=5
 )
 
-logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.ERROR))
+# Force rotation at startup to create a new log file for this run
+file_handler.doRollover()
 
+# Configure console handler
+console_handler = logging.StreamHandler()
 
+# Set formatter for both handlers
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+# Set all packages to ERROR level to reduce noise
+logging.getLogger().setLevel(logging.ERROR)
+
+# Explicitly set common noisy packages to ERROR level
+noisy_packages = [
+    'tastytrade',
+    'httpx', 
+    'httpcore',
+    'urllib3',
+    'requests',
+    'pandas',
+    'gspread',
+    'google',
+    'googleapiclient',
+    'oauth2client',
+    'websockets',
+    'asyncio'
+]
+
+for package in noisy_packages:
+    logging.getLogger(package).setLevel(logging.ERROR)
+
+# Set only __main__ (our application) to the configured log level
 logger = logging.getLogger(__name__)
-logger.setLevel(getattr(logging, LOG_LEVEL, logging.ERROR))
+logger.setLevel(log_level)
+
+# Log that rotation happened and new log file started
+logger.info("="*60)
+logger.info("NEW LOG SESSION STARTED - Previous logs rotated to backup files")
+logger.info("="*60)
 
 market_data: MarketData | None = None
 SPY_SYMBOL = 'SPY'
@@ -45,6 +92,7 @@ def format_end_of_week_row(worksheet, row: int) -> None:
     :param worksheet: The worksheet to format.
     :param row: The row number to format.
     """
+    logger.debug(f"Formatting end of week row {row}")
     light_yellow = {
         'backgroundColor': {
             'red': 1.0,
@@ -52,7 +100,9 @@ def format_end_of_week_row(worksheet, row: int) -> None:
             'blue': 0.8
         }
     }
+    logger.debug(f"Applying light yellow formatting to range A{row}:P{row}")
     worksheet.format(f'A{row}:P{row}', light_yellow)
+    logger.debug("End of week row formatting completed")
 
 
 def get_first_empty_row(worksheet, start_row=2) -> int:
@@ -60,31 +110,52 @@ def get_first_empty_row(worksheet, start_row=2) -> int:
     Returns the first empty row in the given worksheet by fetching column A
     in one call and then checking in memory.
     """
+    logger.debug(f"Finding first empty row starting from row {start_row}")
     # Fetch all values in the first column at once
     col_values = worksheet.col_values(1)
+    logger.debug(f"Column A has {len(col_values)} values")
 
     # Iterate over the values in column A
     for idx, value in enumerate(col_values, start=1):
         if idx >= start_row and not value:
+            logger.debug(f"Found empty cell at row {idx}")
             return idx
 
     # If no empty cell was found, it's the row after the last value
-    return len(col_values) + 1
+    empty_row = len(col_values) + 1
+    logger.debug(f"No empty cells found, returning row after last value: {empty_row}")
+    return empty_row
 
 
 def update_dashboard() -> None:
     """
     Updates the dashboard sheet in the tracker workbook with new data.
     """
+    logger.debug("Starting update_dashboard function")
     try:
+        logger.debug("Creating application session")
         session = ApplicationSession().session
+        logger.debug(f"Session created successfully: {type(session)}")
+        
+        logger.debug("Getting account information")
         account = Account(session).account
+        logger.debug(f"Account retrieved: {account.account_number if hasattr(account, 'account_number') else 'Unknown'}")
 
+        logger.debug("Fetching portfolio data")
         portfolio_data = get_portfolio_data(session, account)
+        logger.debug(f"Portfolio data retrieved: {len(portfolio_data) if portfolio_data else 0} items")
+        
+        logger.debug("Fetching balance data")
         balance_data = get_balance_data(session, account)
+        logger.debug(f"Balance data retrieved: {len(balance_data) if balance_data else 0} items")
+        
+        logger.debug("Fetching margin data")
         margin_data = get_margin_data(session, account)
+        logger.debug(f"Margin data retrieved: {len(margin_data) if margin_data else 0} items")
 
+        logger.debug("Updating dashboard sheet with collected data")
         update_dashboard_sheet(portfolio_data, balance_data, margin_data)
+        logger.debug("update_dashboard function completed successfully")
     except Exception as e:
         logger.error(f"Error updating dashboard: {e}", exc_info=True)
         raise  # Re-raise the exception after logging
@@ -94,60 +165,112 @@ def get_portfolio_data(session: Session, account: Account) -> Dict[str, int]:
     """
     Retrieves portfolio data including beta-weighted delta and theta.
     """
+    logger.debug("Starting get_portfolio_data function")
     portfolio_beta_weighted_delta, portfolio_theta, theta_vega_ratio = get_portfolio_metrics(session, account)
-    return {
+    logger.debug(f"Portfolio metrics calculated - BWD: {portfolio_beta_weighted_delta}, Theta: {portfolio_theta}, T/V Ratio: {theta_vega_ratio}")
+    
+    result = {
         'beta_weighted_delta': round(portfolio_beta_weighted_delta),
         'theta': round(portfolio_theta),
         'theta_vega_ratio': theta_vega_ratio
     }
+    logger.debug(f"get_portfolio_data returning: {result}")
+    return result
 
 
 def get_balance_data(session: Session, account: Account) -> Dict[str, int]:
     """
     Retrieves account balance data.
     """
+    logger.debug("Starting get_balance_data function")
     balance = account.get_balances(session)
-    return {
+    logger.debug(f"Balance object retrieved: {type(balance)}")
+    logger.debug(f"Net liquidating value: {balance.net_liquidating_value}")
+    
+    result = {
         'net_liquidating_value': int(balance.net_liquidating_value)
     }
+    logger.debug(f"get_balance_data returning: {result}")
+    return result
 
 
 def get_margin_data(session: Session, account: Account) -> Dict[str, Any]:
     """
     Retrieves margin requirement data.
     """
+    logger.debug("Starting get_margin_data function")
     margin_requirement_report = account.get_margin_requirements(session)
+    logger.debug(f"Margin requirement report retrieved with {len(margin_requirement_report.groups)} groups")
+    
     margin_requirement = 0
     bil = 0
-    for margin_report in margin_requirement_report.groups:
+    for i, margin_report in enumerate(margin_requirement_report.groups):
+        logger.debug(f"Processing margin group {i}: {margin_report.description}, Buying power: {margin_report.buying_power}")
         margin_requirement += margin_report.buying_power
         if margin_report.description == 'BIL':
             bil = margin_report.buying_power
+            logger.debug(f"Found BIL group with buying power: {bil}")
 
-    return {
+    logger.debug(f"Total margin requirement: {margin_requirement}, BIL: {bil}")
+    result = {
         'margin_requirement': int(margin_requirement),
         'bil': int(bil)
     }
+    logger.debug(f"get_margin_data returning: {result}")
+    return result
 
 
 def get_portfolio_metrics(session: Session, account: Account) -> Tuple[Decimal, Decimal]:
     """
     Calculates portfolio beta-weighted delta and theta.
     """
+    logger.debug("Starting get_portfolio_metrics function")
+    
+    logger.debug("Getting filtered positions")
     positions = get_filtered_positions(account, session)
+    logger.debug(f"Retrieved {len(positions)} filtered positions")
+    
+    logger.debug("Getting beta data")
     betas = get_betas(session)
+    logger.debug(f"Retrieved beta data for {len(betas)} symbols")
+    
+    logger.debug("Creating symbol map")
     symbol_map = get_symbol_map(session, positions)
+    logger.debug(f"Created symbol map with {len(symbol_map)} entries")
+    
+    logger.debug("Adding current prices to symbol map")
     symbol_map, price_spy = add_current_prices(session, symbol_map, betas)
+    logger.debug(f"Added current prices, SPY price: {price_spy}")
+    
+    logger.debug("Getting Greeks data")
     greeks = get_greeks(symbol_map)
+    logger.debug(f"Retrieved Greeks for {len(greeks)} symbols")
+    
+    logger.debug("Adding ETF Greeks to symbol map")
     symbol_map = add_etf_greeks(symbol_map, greeks, betas)
+    logger.debug("ETF Greeks added to symbol map")
+    
+    logger.debug("Adding SPY beta delta to symbol map")
     symbol_map = add_spy_beta_delta(symbol_map, greeks, betas, price_spy)
+    logger.debug("SPY beta delta added to symbol map")
 
+    logger.debug("Calculating portfolio totals")
     portfolio_beta_weighted_delta = sum(
         Decimal(x.get('beta_weighted_delta', 0)) for x in symbol_map)
     portfolio_theta = sum(Decimal(x.get('theta', 0)) for x in symbol_map)
     portfolio_vega = sum(Decimal(x.get('vega', 0)) for x in symbol_map)
-    theta_vega_ratio = f'1 : {round(portfolio_vega/portfolio_theta)}'
+    
+    logger.debug(f"Portfolio BWD: {portfolio_beta_weighted_delta}, Theta: {portfolio_theta}, Vega: {portfolio_vega}")
+    
+    # Handle division by zero for theta/vega ratio
+    if portfolio_theta != 0:
+        theta_vega_ratio = f'1 : {round(portfolio_vega/portfolio_theta)}'
+        logger.debug(f"Theta/Vega ratio calculated: {theta_vega_ratio}")
+    else:
+        theta_vega_ratio = '1 : 0'
+        logger.warning("Portfolio theta is zero, setting theta/vega ratio to '1 : 0'")
 
+    logger.debug("get_portfolio_metrics function completed")
     return portfolio_beta_weighted_delta, portfolio_theta, theta_vega_ratio
 
 
@@ -222,8 +345,15 @@ def add_current_prices(session: Session, symbol_map: List[Dict[str, Any]],
     global market_data
 
     etf_symbols = get_unique_etf_symbols(symbol_map, betas)
+    logger.debug(f"Subscribing to trades for {len(etf_symbols)} symbols: {etf_symbols}")
     market_data.subscribe_trades(etf_symbols)
+    
+    # Wait for streamer to receive data
+    logger.debug("Waiting for streamer to receive trade data...")
+    time.sleep(2)  # Give streamer time to receive data
+    
     current_prices = market_data.get_trades(etf_symbols)
+    logger.debug(f"Retrieved {len(current_prices)} trade prices from streamer")
 
     for item in symbol_map:
         etf_symbol = item['etf']
@@ -233,6 +363,13 @@ def add_current_prices(session: Session, symbol_map: List[Dict[str, Any]],
 
     spy_price = Decimal(next((trade.price for trade in current_prices if
                               trade.event_symbol == SPY_SYMBOL), 0))
+    
+    if spy_price == 0:
+        logger.warning(f"SPY price is 0! Available symbols in current_prices: {[trade.event_symbol for trade in current_prices]}")
+        logger.warning("This may cause division by zero errors in beta calculations")
+    else:
+        logger.debug(f"SPY price retrieved successfully: {spy_price}")
+    
     return symbol_map, spy_price
 
 
@@ -307,17 +444,30 @@ def add_spy_beta_delta(symbol_map: List[Dict[str, Any]], greeks: Dict[str, Any],
     """
     Adds SPY beta-weighted delta to the symbol map.
     """
+    # Check for invalid or zero price_spy to prevent division errors
+    if not price_spy or price_spy == 0:
+        logger.warning(f"Invalid or zero SPY price: {price_spy}. Setting all beta_weighted_delta to 0")
+        for item in symbol_map:
+            item['beta_weighted_delta'] = Decimal(0)
+        return symbol_map
+    
     for item in symbol_map:
         streamer_symbol = item['streamer_symbol']
         if streamer_symbol in greeks:
             base_symbol = get_base_symbol(item['symbol'])
             beta = betas[base_symbol]['SPY_BETA']
             if beta != 'None':
-                item['beta_weighted_delta'] = Decimal(
-                    item["etf_weighted_delta"]) * Decimal(beta) * Decimal(
-                    item["current_price_etf"]) / price_spy
+                try:
+                    item['beta_weighted_delta'] = Decimal(
+                        item["etf_weighted_delta"]) * Decimal(beta) * Decimal(
+                        item["current_price_etf"]) / price_spy
+                    logger.debug(f"Calculated beta_weighted_delta for {streamer_symbol}: {item['beta_weighted_delta']}")
+                except (ZeroDivisionError, Exception) as e:
+                    logger.error(f"Error calculating beta_weighted_delta for {streamer_symbol}: {e}")
+                    item['beta_weighted_delta'] = Decimal(0)
             else:
                 item['beta_weighted_delta'] = Decimal(0)
+                logger.debug(f"No beta available for {streamer_symbol}, setting beta_weighted_delta to 0")
     return symbol_map
 
 
@@ -327,30 +477,54 @@ def update_dashboard_sheet(portfolio_data: Dict[str, Decimal],
     """
     Updates the dashboard sheet with the new data.
     """
+    logger.debug("Starting update_dashboard_sheet function")
+    logger.debug(f"Portfolio data keys: {list(portfolio_data.keys())}")
+    logger.debug(f"Balance data keys: {list(balance_data.keys())}")
+    logger.debug(f"Margin data keys: {list(margin_data.keys())}")
+    
+    logger.debug("Getting tracker workbook")
     tracker_workbook = get_workbook()
+    
+    logger.debug("Getting Dashboard worksheet")
     dashboard = tracker_workbook.worksheet("Dashboard")
+    
+    logger.debug("Finding first empty row")
     row = get_first_empty_row(dashboard, start_row=4)
+    logger.debug(f"First empty row: {row}")
 
     # Get the date from the last non-empty row
+    logger.debug("Getting last row date")
     last_row_date = dashboard.cell(row - 1, 1).value
+    logger.debug(f"Last row date: {last_row_date}")
 
+    logger.debug("Preparing new row data")
     new_row_data = prepare_new_row_data(dashboard, row,
                                         last_row_date,
                                         portfolio_data,
                                         balance_data,
                                         margin_data)
+    logger.debug(f"New row data prepared with {len(new_row_data)} columns")
 
     is_new_row = not is_same_date(new_row_data[0], last_row_date)
+    logger.debug(f"Is new row: {is_new_row} (new date: {new_row_data[0]}, last date: {last_row_date})")
 
     if is_new_row:
+        logger.debug("Inserting new row")
         # Insert an empty row before adding new data
         dashboard.insert_row([], row)
         insert_row_data(dashboard, row, new_row_data)
+        logger.debug(f"New row inserted at row {row}")
         
         if is_end_of_trading_week():
+            logger.debug("End of trading week detected, formatting row")
             format_end_of_week_row(dashboard, row)
+        else:
+            logger.debug("Not end of trading week")
     else:
+        logger.debug(f"Updating existing row {row - 1}")
         update_existing_row(dashboard, row - 1, new_row_data)
+    
+    logger.debug("update_dashboard_sheet function completed")
 
 
 def prepare_new_row_data(dashboard, row: int,
@@ -447,30 +621,54 @@ def adjust_formula(formula: str) -> str:
 
 
 def is_closed_today():
+    logger.debug("Starting is_closed_today function")
     current_year = datetime.now().year
+    today = datetime.now().date()
+    logger.debug(f"Checking if exchanges are closed for today: {today} (year: {current_year})")
+    
+    logger.debug("Getting NYSE calendar")
     nyse = mcal.get_calendar('NYSE')
+    
+    logger.debug(f"Getting NYSE schedule for {current_year}")
     schedule = nyse.schedule(start_date=f"{current_year}-01-01",
                              end_date=f"{current_year}-12-31")
+    logger.debug(f"NYSE schedule has {len(schedule)} trading days")
+    
+    logger.debug(f"Creating date range for all days in {current_year}")
     all_days = pd.date_range(start=f"{current_year}-01-01",
                              end=f"{current_year}-12-31")
+    logger.debug(f"All days range has {len(all_days)} days")
 
     trading_days = schedule.index
     holidays = all_days.difference(trading_days)
+    logger.debug(f"Found {len(holidays)} non-trading days")
 
-    return datetime.now().date() in holidays.date
+    is_closed = today in holidays.date
+    logger.debug(f"Is today a non-trading day? {is_closed}")
+    return is_closed
 
 
 def main() -> None:
+    logger.info("Starting update_dashboard application")
     global market_data
     try:
+        logger.info("Initializing market data connection")
         market_data = MarketData()
+        
+        logger.info("Starting market data streamer")
         market_data.start_streamer()
+        
+        logger.info("Checking if exchanges are open today")
         if not is_closed_today():
+            logger.info("Exchanges are open - proceeding with dashboard update")
             update_dashboard()
+            logger.info("Dashboard update completed successfully")
         else:
-            logging.info('Today the exchanges are closed')
+            logger.info('Today the exchanges are closed - skipping dashboard update')
+        
+        logger.info("update_dashboard application finished successfully")
     except Exception as e:
-        logging.error(f"Unhandled exception in main: {e}", exc_info=True)
+        logger.error(f"Unhandled exception in main: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

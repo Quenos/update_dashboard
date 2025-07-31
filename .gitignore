@@ -187,6 +187,7 @@ Temporary Items
 
 # Project specific
 *.log
+*.log.*  
 .flake8
 config.ini
 credentials.json
