@@ -30,5 +30,6 @@
     "GOOGL": {"ETF_BETA": "100", "SIZE": "100", "ETF": "GOOGL"},
     "XYZ": {"ETF_BETA": "100", "SIZE": "100", "ETF": "XYZ"},
     "GLD": {"ETF_BETA": "100", "SIZE": "100", "ETF": "GLD"},
+    "MSTR": {"ETF_BETA": "100", "SIZE": "100", "ETF": "MSTR"},
     "USO": {"ETF_BETA": "100", "SIZE": "100", "ETF": "USO"}
 }
