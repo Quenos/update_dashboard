@@ -31,5 +31,6 @@
     "XYZ": {"ETF_BETA": "100", "SIZE": "100", "ETF": "XYZ"},
     "GLD": {"ETF_BETA": "100", "SIZE": "100", "ETF": "GLD"},
     "MSTR": {"ETF_BETA": "100", "SIZE": "100", "ETF": "MSTR"},
+    "ONDS": {"ETF_BETA": "100", "SIZE": "100", "ETF": "ONDS"},
     "USO": {"ETF_BETA": "100", "SIZE": "100", "ETF": "USO"}
 }
