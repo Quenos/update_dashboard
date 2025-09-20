@@ -1,5 +1,7 @@
-from tastytrade import Account as ac
 import logging
+
+from tastytrade import Account as ac
+
 from config import ACCOUNT_ID
 
 logger = logging.getLogger(__name__)

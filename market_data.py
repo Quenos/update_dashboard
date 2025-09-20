@@ -1,12 +1,14 @@
 import asyncio
 from dataclasses import dataclass, field
+from enum import Enum
 from threading import Thread
 from typing import Any, ClassVar, Dict, List
 
-from session import ApplicationSession
 from tastytrade.instruments import Future
 from tastytrade.streamer import DXLinkStreamer, Greeks, Quote, Trade
-from enum import Enum
+
+from session import ApplicationSession
+
 
 class EventType(str, Enum):
     GREEKS = 'Greeks'

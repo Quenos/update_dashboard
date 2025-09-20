@@ -1,4 +1,5 @@
 import re
+
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -59,7 +60,6 @@ def copy_format(source_sheet: str, destination_sheet: str):
     spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     sheets = spreadsheet.get('sheets', '')
 
-    source_sheet_id = [sheet['properties']['sheetId'] for sheet in sheets if sheet['properties']['title'] == source_sheet][0]
     destination_sheet_id = [sheet['properties']['sheetId'] for sheet in sheets if sheet['properties']['title'] == destination_sheet][0]
     
     request = {
@@ -118,7 +118,7 @@ def copy_format(source_sheet: str, destination_sheet: str):
         ]
     }
 
-    response = service.spreadsheets().batchUpdate(
+    service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body=request
     ).execute()

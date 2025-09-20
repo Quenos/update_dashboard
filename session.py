@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta
 
 from tastytrade import OAuthSession
+
 from config import TT_API_CLIENT_SECRET, TT_REFRESH_TOKEN
 
 logger = logging.getLogger(__name__)
