@@ -4,6 +4,7 @@ from __future__ import annotations
 import bisect
 import logging
 import re
+from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,13 @@ from tastytrade.order import OrderAction
 from trades.trade_history import get_closed_trades, get_opened_trades
 
 from sheets import get_workbook
+from strategies import (
+    MatchEntry,
+    evaluate_strategy_for_group,
+    load_strategy_definitions,
+    normalize_option_type,
+)
+
 from utils import read_timestamp, write_timestamp
 
 
@@ -26,7 +34,63 @@ def ensure_aware_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+def _try_parse_futures_option_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Attempt to parse a futures-style option symbol.
 
+    Expected examples:
+      ./CLZ5 LOZ5  251117P55  -> ticker=CL, expiration=2025-11-17, option_type=P, strike=55
+      ./ESZ5 ESZ5  251117C5000 -> ticker=ES, expiration=2025-11-17, option_type=C, strike=5000
+
+    This function is generic for any root after './', e.g. ./CL, ./ES, ./6E, etc.
+    Returns None if the format does not match.
+    """
+    if not symbol:
+        return None
+
+    text = symbol.strip()
+    if not text.startswith("./"):
+        return None
+
+    root_match = re.match(r"^\./([A-Za-z0-9]+)", text)
+    if not root_match:
+        return None
+
+    ticker_root = root_match.group(1).upper()
+
+    # Find the expiration + option type + strike trio (e.g., 251117P55)
+    trio_match = re.search(r"(\d{6})([CPcp])([0-9]+(?:\.[0-9]+)?)", text)
+    if not trio_match:
+        logger.debug("Futures symbol detected but no date/type/strike trio found: %s", text)
+        return None
+
+    yymmdd = trio_match.group(1)
+    opt_flag = trio_match.group(2).upper()
+    strike_text = trio_match.group(3)
+
+    try:
+        year = 2000 + int(yymmdd[0:2])
+        month = int(yymmdd[2:4])
+        day = int(yymmdd[4:6])
+        exp = date(year, month, day)
+    except ValueError:
+        logger.warning("Unable to parse futures option expiration from %r in %r", yymmdd, text)
+        return None
+
+    strike_value: Optional[Decimal]
+    try:
+        strike_value = Decimal(strike_text)
+    except InvalidOperation:
+        logger.warning("Unable to parse futures option strike from %r in %r", strike_text, text)
+        return None
+
+    strike_value = strike_value.quantize(Decimal("0.001"))
+
+    return {
+        "ticker": ticker_root,
+        "expiration": exp,
+        "option_type": opt_flag,
+        "strike": strike_value,
+    }
 
 def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
     """Move closed trades from OPEN to CLOSED while keeping sheet formulas intact."""
@@ -150,15 +214,31 @@ def update_opened_trades_sheet(opened_trades: List[Transaction]) -> None:
     open_sheet = workbook.worksheet("OPEN")
     _ensure_sort_manual_row(open_sheet)
 
+    strategies = sorted(
+        load_strategy_definitions(),
+        key=_strategy_leg_count,
+        reverse=True,
+    )
+    grouped_trades: "OrderedDict[Tuple[str, str], List[Dict[str, Any]]]" = OrderedDict()
+
     for trade in opened_trades:
         trade_info = _parse_trade_transaction(trade)
         if not trade_info:
             continue
+        key = (trade_info['group_key'], trade_info['ticker'])
+        grouped_trades.setdefault(key, []).append(trade_info)
+
+    for (group_key, ticker), trades in grouped_trades.items():
+        if not trades:
+            continue
         try:
-            _process_open_trade(open_sheet, trade_info)
+            _process_trade_group(open_sheet, trades, strategies)
         except Exception as exc:
             logger.error(
-                f"Failed to process opened trade {trade.symbol}: {exc}",
+                "Failed to process trade group %s for %s: %s",
+                group_key,
+                ticker,
+                exc,
                 exc_info=True,
             )
 
@@ -279,6 +359,56 @@ def _center_row_cells(sheet, row_index: int, start_column: int = 1, end_column: 
     except Exception as exc:
         logger.error(
             f"Failed to center align row {row_index} on sheet {sheet.title}: {exc}",
+            exc_info=True,
+        )
+
+
+def _apply_six_decimal_price_format(
+    sheet,
+    row_index: int,
+    columns: Tuple[int, ...] = (8, 9),
+) -> None:
+    if row_index <= 0 or not columns:
+        return
+
+    requests: List[Dict[str, Any]] = []
+    for column in columns:
+        if column <= 0:
+            continue
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet.id,
+                        "startRowIndex": row_index - 1,
+                        "endRowIndex": row_index,
+                        "startColumnIndex": column - 1,
+                        "endColumnIndex": column,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "numberFormat": {
+                                "type": "NUMBER",
+                                "pattern": "0.000000",
+                            }
+                        }
+                    },
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+        )
+
+    if not requests:
+        return
+
+    try:
+        sheet.spreadsheet.batch_update({"requests": requests})
+    except Exception as exc:
+        logger.error(
+            "Failed to apply six-decimal price format on row %s for sheet %s: %s",
+            row_index,
+            sheet.title,
+            exc,
             exc_info=True,
         )
 
@@ -519,15 +649,25 @@ def _parse_trade_transaction(trade: Transaction) -> Optional[Dict[str, Any]]:
 
     occ_symbol = occ_symbol.strip()
 
-    try:
-        ticker = occ_symbol[:6].strip()
-        expiration = datetime.strptime(occ_symbol[6:12], "%y%m%d").date()
-        option_type = occ_symbol[12].upper()
-        strike_raw = occ_symbol[13:]
-        strike = (Decimal(int(strike_raw)) / Decimal(1000)).quantize(Decimal("0.001"))
-    except (ValueError, InvalidOperation):
-        logger.warning(f"Unable to parse OCC symbol {occ_symbol!r}")
-        return None
+    # Try parsing futures-style option symbols like:
+    # "./CLZ5 LOZ5  251117P55" → ticker=CL, expiration=2025-11-17, option_type=P, strike=55
+    # Works generically for roots like ./CL, ./ES, ./6E, etc.
+    futures_parsed: Optional[Dict[str, Any]] = _try_parse_futures_option_symbol(occ_symbol)
+    if futures_parsed is not None:
+        ticker = futures_parsed["ticker"]
+        expiration = futures_parsed["expiration"]
+        option_type = futures_parsed["option_type"]
+        strike = futures_parsed["strike"]
+    else:
+        try:
+            ticker = occ_symbol[:6].strip()
+            expiration = datetime.strptime(occ_symbol[6:12], "%y%m%d").date()
+            option_type = occ_symbol[12].upper()
+            strike_raw = occ_symbol[13:]
+            strike = (Decimal(int(strike_raw)) / Decimal(1000)).quantize(Decimal("0.001"))
+        except (ValueError, InvalidOperation):
+            logger.warning(f"Unable to parse OCC symbol {occ_symbol!r}")
+            return None
 
     action = getattr(trade, "action", None)
     action_code = _action_to_sheet_code(action)
@@ -541,8 +681,17 @@ def _parse_trade_transaction(trade: Transaction) -> Optional[Dict[str, Any]]:
     executed_at = ensure_aware_datetime(
         getattr(trade, "executed_at", datetime.now(timezone.utc))
     )
+    today = datetime.now(timezone.utc).date()
+    created_days_out = None
+    current_days_out = None
+    if expiration:
+        created_days_out = (expiration - executed_at.date()).days
+        current_days_out = (expiration - today).days
     underlying_symbol = getattr(trade, "underlying_symbol", None)
     display_ticker = (underlying_symbol or ticker).strip()
+    order_id = getattr(trade, "order_id", None)
+    transaction_id = getattr(trade, "id", None)
+    group_key = str(order_id or transaction_id or occ_symbol)
 
     return {
         "occ_symbol": occ_symbol,
@@ -554,8 +703,17 @@ def _parse_trade_transaction(trade: Transaction) -> Optional[Dict[str, Any]]:
         "quantity": quantity,
         "action": action,
         "action_code": action_code,
+        "order_id": order_id,
+        "transaction_id": transaction_id,
+        "group_key": group_key,
         "executed_at": executed_at,
-        "open_price": _format_trade_price(getattr(trade, "price", None), action),
+        "created_days_out": created_days_out,
+        "current_days_out": current_days_out,
+        "open_price": _format_trade_price(
+            getattr(trade, "price", None),
+            action,
+            symbol=occ_symbol,
+        ),
     }
 
 
@@ -589,65 +747,42 @@ def _group_open_rows_by_ticker_and_number(
     return groups
 
 
-def _group_matches_pmcc(rows: List[Dict[str, Any]]) -> bool:
-    bto_calls = [r for r in rows if r['action'] == 'BTO' and r['trade_type'] == 'CALL']
-    sto_puts = [r for r in rows if r['action'] == 'STO' and r['trade_type'] == 'PUT']
-    bto_puts = [r for r in rows if r['action'] == 'BTO' and r['trade_type'] == 'PUT']
+def _insert_manual_trade(
+    open_sheet,
+    trade_info: Dict[str, Any],
+    *,
+    strategy_label: Optional[str] = None,
+) -> None:
+    open_rows, column_count = _ensure_sort_manual_row(open_sheet)
+    sort_row, empty_row = _find_manual_section(open_rows)
+    target_row = (sort_row + 1) if sort_row else len(open_rows) + 1
+    template_entry = _find_previous_entry_with_formulas(open_rows, empty_row or target_row)
+    template_formulas = _extract_formula_map(template_entry) if template_entry else None
+    row_offset = 0
+    if template_entry:
+        target_for_offset = empty_row if empty_row is not None else target_row
+        row_offset = target_for_offset - template_entry['row']
+    target_row_index = empty_row if empty_row is not None else target_row
+    row_values = _build_open_sheet_row_values(
+        trade_info,
+        "",
+        column_count,
+        strategy_label=strategy_label,
+        template_formulas=template_formulas,
+        row_offset=row_offset,
+        target_row_index=target_row_index,
+    )
 
-    for call_entry in bto_calls:
-        if not call_entry['expiration'] or call_entry['strike'] <= 0:
-            continue
-        for sto_put in sto_puts:
-            if (
-                sto_put['expiration'] == call_entry['expiration']
-                and sto_put['strike'] == call_entry['strike']
-            ):
-                for bto_put in bto_puts:
-                    if (
-                        bto_put['expiration'] == call_entry['expiration']
-                        and bto_put['strike'] < call_entry['strike']
-                        and bto_put['strike'] > 0
-                    ):
-                        return True
-    return False
-
-
-def _find_pmcc_group(
-    groups_for_ticker: Optional[Dict[str, List[Dict[str, Any]]]]
-) -> Optional[Tuple[int, str, Dict[str, Any]]]:
-    if not groups_for_ticker:
-        return None
-
-    for number, rows in groups_for_ticker.items():
-        if _group_matches_pmcc(rows):
-            rows_sorted = sorted(rows, key=lambda item: item['row'])
-            insert_index = rows_sorted[-1]['row'] + 1
-            template_entry = rows_sorted[-1]
-            return insert_index, number, template_entry
-    return None
-
-
-def _find_leap_group(
-    groups_for_ticker: Optional[Dict[str, List[Dict[str, Any]]]]
-) -> Optional[Tuple[int, str, Dict[str, Any]]]:
-    if not groups_for_ticker:
-        return None
-
-    for number, rows in groups_for_ticker.items():
-        rows_sorted = sorted(rows, key=lambda item: item['row'])
-        for entry in rows_sorted:
-            if (
-                entry['action'] == 'BTO'
-                and entry['trade_type'] == 'CALL'
-                and entry['open_date']
-                and entry['expiration']
-                and (entry['expiration'] - entry['open_date']).days >= 170
-            ):
-                insert_index = rows_sorted[-1]['row'] + 1
-                template_entry = rows_sorted[-1]
-                return insert_index, number, template_entry
-    return None
-
+    if empty_row is None:
+        open_sheet.insert_row(row_values, target_row, value_input_option="USER_ENTERED")
+        _center_row_cells(open_sheet, target_row)
+        if _requires_six_decimal_price(trade_info.get('occ_symbol')):
+            _apply_six_decimal_price_format(open_sheet, target_row)
+    else:
+        open_sheet.update([row_values], _row_range(empty_row, column_count), value_input_option="USER_ENTERED")
+        _center_row_cells(open_sheet, empty_row)
+        if _requires_six_decimal_price(trade_info.get('occ_symbol')):
+            _apply_six_decimal_price_format(open_sheet, empty_row)
 
 def _ensure_sort_manual_row(open_sheet) -> Tuple[List[Dict[str, Any]], int]:
     while True:
@@ -840,7 +975,11 @@ def _move_row_with_formulas(
 def _apply_closed_trade_updates(sheet, trade: Transaction) -> None:
     executed_at = ensure_aware_datetime(trade.executed_at)
     close_date = executed_at.astimezone(timezone.utc).strftime("%m/%d/%Y")
-    closing_price = _format_trade_price(trade.price, trade.action)
+    closing_price = _format_trade_price(
+        trade.price,
+        trade.action,
+        symbol=getattr(trade, "symbol", None),
+    )
 
     updates = {
         "O2": close_date,
@@ -903,7 +1042,35 @@ def _extract_year(date_raw: Optional[str]) -> Optional[int]:
     return None
 
 
-def _format_trade_price(price: Optional[Any], action: Optional[OrderAction]) -> str:
+# Symbol prefixes that require special handling
+_SIX_DECIMAL_PRICE_PREFIXES: Tuple[str, ...] = ("./ZB",)
+_THOUSAND_MULTIPLIER_PREFIXES: Tuple[str, ...] = ("./ZB", "./CL")
+
+
+def _matches_symbol_prefix(
+    symbol: Optional[str],
+    prefixes: Tuple[str, ...],
+) -> bool:
+    if symbol is None:
+        return False
+    normalized = symbol.strip().upper()
+    return any(normalized.startswith(prefix) for prefix in prefixes)
+
+
+def _requires_six_decimal_price(symbol: Optional[str]) -> bool:
+    return _matches_symbol_prefix(symbol, _SIX_DECIMAL_PRICE_PREFIXES)
+
+
+def _requires_thousand_multiplier(symbol: Optional[str]) -> bool:
+    return _matches_symbol_prefix(symbol, _THOUSAND_MULTIPLIER_PREFIXES)
+
+
+def _format_trade_price(
+    price: Optional[Any],
+    action: Optional[OrderAction],
+    *,
+    symbol: Optional[str] = None,
+) -> str:
     if price is None:
         return ""
     try:
@@ -916,7 +1083,8 @@ def _format_trade_price(price: Optional[Any], action: Optional[OrderAction]) -> 
     if action in {OrderAction.BUY_TO_CLOSE, OrderAction.BUY_TO_OPEN}:
         price_decimal = -price_decimal
 
-    return f"{price_decimal:.2f}"
+    decimal_format = "{0:.6f}" if _requires_six_decimal_price(symbol) else "{0:.2f}"
+    return decimal_format.format(price_decimal)
 
 
 def _format_expiration_for_sheet(expiration: Optional[date]) -> str:
@@ -988,105 +1156,402 @@ def _find_manual_section(open_rows: List[Dict[str, Any]]) -> Tuple[Optional[int]
     return sort_row, empty_row
 
 
-def _process_open_trade(open_sheet, trade_info: Dict[str, Any]) -> None:
-    open_rows, column_count = _load_open_sheet_rows(open_sheet)
-    if column_count <= 0:
-        column_count = max(open_sheet.col_count, 21)
-
-    if trade_info['occ_symbol'] and any(
-        entry.get('occ_symbol') == trade_info['occ_symbol']
-        for entry in open_rows
-        if entry.get('occ_symbol')
-    ):
-        logger.debug("Trade %s already present on OPEN sheet", trade_info['occ_symbol'])
+def _process_trade_group(
+    open_sheet,
+    trade_group: List[Dict[str, Any]],
+    strategies: List[Dict[str, Any]],
+) -> None:
+    if not trade_group:
         return
 
+    open_rows, column_count = _load_open_sheet_rows(open_sheet)
+    if column_count <= 0:
+        column_count = max(open_sheet.col_count or 21, 21)
+
+    occ_symbols_on_sheet = {
+        entry.get('occ_symbol')
+        for entry in open_rows
+        if entry.get('occ_symbol')
+    }
+
+    if any(
+        trade.get('occ_symbol') in occ_symbols_on_sheet
+        for trade in trade_group
+        if trade.get('occ_symbol')
+    ):
+        group_key = trade_group[0].get('group_key')
+        logger.debug("Trade group %s already present on OPEN sheet", group_key)
+        return
+
+    tickers = {trade['ticker'] for trade in trade_group}
+    if len(tickers) != 1:
+        logger.warning(
+            "Trade group %s contains multiple tickers %s; inserting manually",
+            trade_group[0].get('group_key'),
+            sorted(tickers),
+        )
+        for trade in trade_group:
+            _insert_manual_trade(open_sheet, trade)
+        return
+
+    ticker = next(iter(tickers))
     groups = _group_open_rows_by_ticker_and_number(open_rows)
-    groups_for_ticker = groups.get(trade_info['ticker'])
-
+    groups_for_ticker = groups.get(ticker, {})
     today = datetime.now(timezone.utc).date()
-    pmcc_applicable = _is_pmcc_candidate(trade_info, today)
 
-    if pmcc_applicable:
-        pmcc_group = _find_pmcc_group(groups_for_ticker)
-        if pmcc_group:
-            insert_index, number, template_entry = pmcc_group
-            template_formulas = _extract_formula_map(template_entry)
-            row_offset = insert_index - template_entry['row']
-            row_values = _build_open_sheet_row_values(
-                trade_info,
-                number,
-                column_count,
-                True,
-                template_formulas,
-                row_offset=row_offset,
+    for strategy in strategies:
+        requires_existing = strategy.get('requires_existing_group', True)
+        candidate_groups = (
+            _iter_candidate_groups(groups_for_ticker)
+            if requires_existing
+            else [(None, [])]
+        )
+
+        for number, rows in candidate_groups:
+            result = evaluate_strategy_for_group(
+                strategy,
+                trade_group,
+                rows,
+                today=today,
             )
-            open_sheet.insert_row(row_values, insert_index, value_input_option="USER_ENTERED")
-            _center_row_cells(open_sheet, insert_index)
-            if template_entry:
-                _set_row_bottom_border(open_sheet, template_entry['row'], thick=False)
-            _set_row_bottom_border(open_sheet, insert_index, thick=True)
+            if not result:
+                continue
+
+            ordered_trades = _ordered_new_leg_trades(strategy, result.new_assignments)
+            if len(ordered_trades) != len(trade_group):
+                continue
+
+            if requires_existing:
+                if number is None or not rows:
+                    continue
+                _insert_trades_into_existing_group(
+                    open_sheet,
+                    ordered_trades,
+                    strategy,
+                    str(number),
+                    rows,
+                    column_count,
+                )
+            else:
+                _insert_trades_without_group(
+                    open_sheet,
+                    ordered_trades,
+                    strategy,
+                )
             return
 
-        leap_group = _find_leap_group(groups_for_ticker)
-        if leap_group:
-            insert_index, number, template_entry = leap_group
-            template_formulas = _extract_formula_map(template_entry)
-            row_offset = insert_index - template_entry['row']
-            row_values = _build_open_sheet_row_values(
-                trade_info,
-                number,
-                column_count,
-                True,
-                template_formulas,
-                row_offset=row_offset,
-            )
-            open_sheet.insert_row(row_values, insert_index, value_input_option="USER_ENTERED")
-            _center_row_cells(open_sheet, insert_index)
-            if template_entry:
-                _set_row_bottom_border(open_sheet, template_entry['row'], thick=False)
-            _set_row_bottom_border(open_sheet, insert_index, thick=True)
+    for trade in trade_group:
+        _insert_manual_trade(open_sheet, trade)
+
+def _iter_candidate_groups(
+    groups_for_ticker: Optional[Dict[str, List[Dict[str, Any]]]]
+) -> List[Tuple[Optional[str], List[Dict[str, Any]]]]:
+    if not groups_for_ticker:
+        return []
+
+    candidates: List[Tuple[int, str, List[Dict[str, Any]]]] = []
+    for number, rows in groups_for_ticker.items():
+        if not rows:
+            continue
+        sorted_rows = sorted(rows, key=lambda item: item['row'])
+        first_row = sorted_rows[0]['row']
+        candidates.append((first_row, number, sorted_rows))
+
+    candidates.sort(key=lambda item: item[0])
+    return [(str(number), rows) for _, number, rows in candidates]
+
+def _ordered_new_leg_trades(
+    strategy: Dict[str, Any],
+    new_assignments: Dict[str, MatchEntry],
+) -> List[Dict[str, Any]]:
+    ordered: List[Dict[str, Any]] = []
+    for leg in strategy.get('new_legs', []) or []:
+        role = leg.get('role')
+        if not role:
+            continue
+        entry = new_assignments.get(role)
+        if entry is None:
+            return []
+        ordered.append(entry.data)
+    return ordered
+
+def _insert_trades_into_existing_group(
+    open_sheet,
+    trades: List[Dict[str, Any]],
+    strategy: Dict[str, Any],
+    number: str,
+    group_rows: List[Dict[str, Any]],
+    column_count: int,
+) -> None:
+    if not trades or not group_rows:
+        return
+
+    rows_sorted = sorted(group_rows, key=lambda item: item['row'])
+    template_entry = rows_sorted[-1]
+    template_formulas = _extract_formula_map(template_entry)
+    insert_index = template_entry['row'] + 1
+
+    _set_row_bottom_border(open_sheet, template_entry['row'], thick=False)
+
+    for idx, trade_info in enumerate(trades):
+        row_offset = insert_index - template_entry['row']
+        row_values = _build_open_sheet_row_values(
+            trade_info,
+            number,
+            column_count,
+            strategy_label=strategy.get('group_label'),
+            template_formulas=template_formulas,
+            row_offset=row_offset,
+            target_row_index=insert_index,
+        )
+        open_sheet.insert_row(row_values, insert_index, value_input_option="USER_ENTERED")
+        _center_row_cells(open_sheet, insert_index)
+        if idx < len(trades) - 1:
+            _set_row_bottom_border(open_sheet, insert_index, thick=False)
+        if _requires_six_decimal_price(trade_info.get('occ_symbol')):
+            _apply_six_decimal_price_format(open_sheet, insert_index)
+        insert_index += 1
+
+    _set_row_bottom_border(open_sheet, insert_index - 1, thick=True)
+
+def _insert_trades_without_group(
+    open_sheet,
+    trades: List[Dict[str, Any]],
+    strategy: Dict[str, Any],
+) -> None:
+    header_text = (strategy.get('sheet_header') or '').strip()
+    if header_text:
+        if _insert_trades_under_header(
+            open_sheet,
+            trades,
+            strategy,
+            header_text,
+        ):
             return
 
-    sort_row, empty_row = _find_manual_section(open_rows)
-    target_row = (sort_row + 1) if sort_row else len(open_rows) + 1
-    template_entry = _find_previous_entry_with_formulas(open_rows, empty_row or target_row)
+    for trade_info in trades:
+        _insert_manual_trade(
+            open_sheet,
+            trade_info,
+            strategy_label=strategy.get('group_label'),
+        )
+
+def _insert_trades_under_header(
+    open_sheet,
+    trades: List[Dict[str, Any]],
+    strategy: Dict[str, Any],
+    header_text: str,
+) -> bool:
+    if not trades:
+        return True
+
+    open_rows, column_count = _load_open_sheet_rows(open_sheet)
+    column_count = column_count or open_sheet.col_count or 21
+
+    header_entry = _find_header_entry(open_rows, header_text)
+    next_identifier = _find_next_identifier(open_rows)
+    template_override: Optional[Dict[str, Any]] = None
+    if not header_entry:
+        header_entry, open_rows, template_override = _create_header_before_sort_manual(
+            open_sheet,
+            header_text,
+            open_rows,
+            column_count,
+        )
+        if not header_entry:
+            logger.warning(
+                "Unable to locate or create header %r on OPEN sheet for strategy %s; falling back to manual insertion",
+                header_text,
+                strategy.get('name') or strategy.get('group_label') or 'unknown',
+            )
+            return False
+        next_identifier = _find_next_identifier(open_rows)
+
+    template_entry = template_override or _find_first_data_entry(open_rows)
+    if template_entry is None:
+        updated_rows, _ = _load_open_sheet_rows(open_sheet)
+        open_rows = updated_rows
+        template_entry = _find_first_data_entry(updated_rows)
+        next_identifier = _find_next_identifier(open_rows)
+
     template_formulas = _extract_formula_map(template_entry) if template_entry else None
-    row_offset = 0
-    if template_entry:
-        target_for_offset = empty_row if empty_row is not None else target_row
-        row_offset = target_for_offset - template_entry['row']
-    row_values = _build_open_sheet_row_values(
-        trade_info,
-        "",
-        column_count,
-        False,
-        template_formulas,
-        row_offset=row_offset,
-    )
 
-    if empty_row is None:
-        open_sheet.insert_row(row_values, target_row, value_input_option="USER_ENTERED")
-        _center_row_cells(open_sheet, target_row)
+    insert_row = header_entry['row'] + 1
+
+    for trade_info in trades:
+        row_offset = 0
+        if template_entry:
+            row_offset = insert_row - template_entry['row']
+        row_values = _build_open_sheet_row_values(
+            trade_info,
+            next_identifier,
+            column_count,
+            strategy_label=strategy.get('group_label'),
+            template_formulas=template_formulas,
+            row_offset=row_offset,
+            target_row_index=insert_row,
+        )
+        open_sheet.insert_row(row_values, insert_row, value_input_option="USER_ENTERED")
+        if template_entry:
+            _copy_row_format(open_sheet, template_entry['row'], insert_row, column_count)
+        _center_row_cells(open_sheet, insert_row)
+        if _requires_six_decimal_price(trade_info.get('occ_symbol')):
+            _apply_six_decimal_price_format(open_sheet, insert_row)
+        insert_row += 1
+
+    if trades:
+        _set_row_bottom_border(open_sheet, insert_row - 1, thick=True)
+        # Add a single blank row after the entire strategy group (between strategies)
+        blank_row_values = [''] * column_count
+        open_sheet.insert_row(blank_row_values, insert_row, value_input_option="USER_ENTERED")
+
+    return True
+
+
+def _strategy_leg_count(strategy: Dict[str, Any]) -> int:
+    new_legs = strategy.get('new_legs') or []
+    existing_legs = strategy.get('existing_legs') or []
+    return len(new_legs) + len(existing_legs)
+
+
+def _find_header_entry(
+    open_rows: List[Dict[str, Any]],
+    header_text: str,
+) -> Optional[Dict[str, Any]]:
+    header_normalized = header_text.strip().lower()
+    if not header_normalized:
+        return None
+
+    for entry in open_rows:
+        row_values = entry.get('raw') or []
+        if not row_values:
+            continue
+        if (row_values[0] or '').strip().lower() == header_normalized:
+            return entry
+    return None
+
+
+def _find_template_for_header(
+    open_rows: List[Dict[str, Any]],
+    header_row: int,
+) -> Optional[Dict[str, Any]]:
+    for entry in open_rows:
+        if entry['row'] <= header_row:
+            continue
+        if _extract_formula_map(entry):
+            return entry
+    return _find_previous_entry_with_formulas(open_rows, header_row)
+
+
+def _create_header_before_sort_manual(
+    open_sheet,
+    header_text: str,
+    open_rows: List[Dict[str, Any]],
+    column_count: int,
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    sort_entry = next(
+        (
+            entry
+            for entry in open_rows
+            if entry['raw'] and entry['raw'][0].strip().lower() == 'sort manually'
+        ),
+        None,
+    )
+    if not sort_entry:
+        return None, open_rows, None
+
+    sort_row = sort_entry['row']
+    header_template_entry = _find_previous_header_entry(open_rows, sort_row)
+    values = [''] * column_count
+    values[0] = header_text.strip()
+    open_sheet.insert_row(values, sort_row, value_input_option="USER_ENTERED")
+
+    if header_template_entry:
+        _copy_row_format(open_sheet, header_template_entry['row'], sort_row, column_count)
     else:
-        open_sheet.update([row_values], _row_range(empty_row, column_count), value_input_option="USER_ENTERED")
-        _center_row_cells(open_sheet, empty_row)
+        template_entry = _find_previous_entry_with_formulas(open_rows, sort_row)
+        if template_entry:
+            _copy_row_format(open_sheet, template_entry['row'], sort_row, column_count)
+
+    updated_rows, _ = _load_open_sheet_rows(open_sheet)
+    header_entry = _find_header_entry(updated_rows, header_text)
+    template_entry = None
+    if header_entry:
+        template_entry = _find_first_data_entry(updated_rows)
+    return header_entry, updated_rows, template_entry
+
+
+def _find_previous_header_entry(
+    open_rows: List[Dict[str, Any]],
+    before_row: int,
+) -> Optional[Dict[str, Any]]:
+    for entry in reversed(open_rows):
+        if entry['row'] >= before_row:
+            continue
+        row_values = entry.get('raw') or []
+        if not row_values:
+            continue
+        label = (row_values[0] or '').strip()
+        number = (row_values[1] or '').strip() if len(row_values) > 1 else ''
+        if label and not number:
+            return entry
+    return None
+
+
+def _find_first_data_entry_after(
+    open_rows: List[Dict[str, Any]],
+    header_row: int,
+) -> Optional[Dict[str, Any]]:
+    for entry in open_rows:
+        if entry['row'] <= header_row:
+            continue
+        open_date = entry.get('open_date')
+        if isinstance(open_date, date):
+            return entry
+    return None
+
+
+def _find_first_data_entry(
+    open_rows: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    for entry in open_rows:
+        open_date = entry.get('open_date')
+        if isinstance(open_date, date):
+            return entry
+    return None
+
+
+def _find_next_identifier(open_rows: List[Dict[str, Any]]) -> str:
+    for entry in open_rows:
+        raw = entry.get('raw') or []
+        if not raw:
+            continue
+        if raw[0].strip().lower() == 'next':
+            if len(raw) > 2 and raw[2]:
+                return raw[2]
+            cell = entry.get('formulas') or []
+            if len(cell) > 2 and cell[2] and not cell[2].startswith('='):
+                return cell[2]
+            return ''
+    return ''
 
 
 def _build_open_sheet_row_values(
     trade_info: Dict[str, Any],
     number_value: str,
     column_count: int,
-    is_pmcc: bool,
-    template_formulas: Optional[Dict[int, str]] = None,
     *,
+    strategy_label: Optional[str] = None,
+    template_formulas: Optional[Dict[int, str]] = None,
     row_offset: int = 0,
+    target_row_index: Optional[int] = None,
 ) -> List[str]:
     values = [''] * column_count
     executed_at = trade_info['executed_at'].astimezone(timezone.utc)
     values[0] = executed_at.strftime('%m/%d/%y')
+    identifier = number_value or str(trade_info.get('order_id') or trade_info.get('transaction_id') or '')
     if column_count > 1:
-        values[1] = number_value
+        values[1] = identifier
     if column_count > 2:
         values[2] = trade_info['action_code']
     if column_count > 3:
@@ -1094,21 +1559,36 @@ def _build_open_sheet_row_values(
     if column_count > 4:
         values[4] = _format_expiration_for_sheet(trade_info.get('expiration'))
     if column_count > 5:
-        values[5] = 'CALL' if trade_info.get('option_type') == 'C' else 'PUT'
+        opt_type = normalize_option_type(trade_info.get('option_type'))
+        if opt_type == 'CALL':
+            values[5] = 'CALL'
+        elif opt_type == 'PUT':
+            values[5] = 'PUT'
+        else:
+            values[5] = ''
     if column_count > 6:
         values[6] = _format_strike_for_sheet(trade_info.get('strike', Decimal(0)))
     if column_count > 7:
         values[7] = trade_info.get('open_price', '')
     if column_count > 10:
         values[10] = _format_quantity_for_sheet(trade_info.get('quantity', Decimal(1)))
-    if is_pmcc and column_count > 20:
-        values[20] = 'PMCC'
+    if strategy_label and column_count > 20:
+        values[20] = strategy_label
 
     if template_formulas:
         for idx, formula in template_formulas.items():
             if 0 <= idx < column_count and not values[idx]:
                 adjusted = _shift_formula_rows(formula, row_offset)
                 values[idx] = adjusted
+
+    occ_symbol = trade_info.get('occ_symbol')
+    thousand_multiplier_required = _requires_thousand_multiplier(occ_symbol)
+
+    if target_row_index is not None and thousand_multiplier_required:
+        if column_count > 12:
+            values[12] = f"=H{target_row_index}*K{target_row_index}*1000"
+        if column_count > 15:
+            values[15] = f"=J{target_row_index}*K{target_row_index}*1000"
     return values
 
 
@@ -1132,18 +1612,6 @@ def _find_previous_entry_with_formulas(
         if _extract_formula_map(entry):
             return entry
     return None
-
-
-def _is_pmcc_candidate(trade_info: Dict[str, Any], today: date) -> bool:
-    if trade_info.get('action') != OrderAction.SELL_TO_OPEN:
-        return False
-    if trade_info.get('option_type') != 'C':
-        return False
-    expiration = trade_info.get('expiration')
-    if not expiration:
-        return False
-    days_out = (expiration - today).days
-    return 0 <= days_out <= 50
 
 
 def _extract_option_flag(option_type_raw: str) -> Optional[str]:

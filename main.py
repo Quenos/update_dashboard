@@ -24,7 +24,7 @@ def configure_logging() -> None:
 
     root = logging.getLogger()
     root.handlers.clear()
-    root.setLevel(logging.WARNING)
+    root.setLevel(level)
 
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,9 +35,11 @@ def configure_logging() -> None:
         'update_dashboard.log', maxBytes=1024 * 1024 * 10, backupCount=5
     )
     file_handler.doRollover()
+    file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
 
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
 
     root.addHandler(file_handler)

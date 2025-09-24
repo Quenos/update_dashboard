@@ -1,0 +1,260 @@
+[
+  {
+    "name": "SYNTHETIC_PMCC_INITIAL",
+    "description": "Initial establishment of a PMCC position when all legs fill together.",
+    "group_label": "PMCC",
+    "sheet_header": "PMCC",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_call",
+        "actions": ["BTO"],
+        "option_types": ["CALL"]
+      },
+      {
+        "role": "short_put",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_call", "strike": "long_call"},
+        "match_expiration_relation": "equal",
+        "match_strike_relation": "equal"
+      },
+      {
+        "role": "protective_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_call", "strike": "long_call"},
+        "match_expiration_relation": "equal",
+        "match_strike_relation": "lower"
+      },
+      {
+        "role": "income_short_call",
+        "actions": ["STO"],
+        "option_types": ["CALL"],
+        "match": {"strike": "long_call", "expiration": "value"},
+        "match_strike_relation": "equal_or_higher",
+        "match_expiration_relation": {"max_days_out_from_today": 50}
+      }
+    ],
+    "existing_legs": []
+  },
+  {
+    "name": "SYNTHETIC_PMCC",
+    "description": "Adjustments to an existing PMCC position (roll short leg, etc).",
+    "group_label": "PMCC",
+    "sheet_header": "PMCC",
+    "requires_existing_group": true,
+    "new_legs": [
+      {
+        "role": "income_short_call_new",
+        "actions": ["STO"],
+        "option_types": ["CALL"],
+        "match": {"strike": "long_call", "expiration": "value"},
+        "match_expiration_relation": {"max_days_out_from_today": 50},
+        "match_strike_relation": "equal_or_higher"
+      }
+    ],
+    "existing_legs": [
+      {
+        "role": "long_call",
+        "actions": ["BTO"],
+        "option_types": ["CALL"]
+      },
+      {
+        "role": "short_put",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_call", "strike": "long_call"},
+        "match_expiration_relation": "equal",
+        "match_strike_relation": "equal"
+      },
+      {
+        "role": "protective_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_call", "strike": "long_call"},
+        "match_expiration_relation": "equal",
+        "match_strike_relation": "lower"
+      }
+    ]
+  },
+  {
+    "name": "LEAP_PMCC_INITIAL",
+    "description": "PMCC based on long LEAP call",
+    "group_label": "PMCC",
+    "sheet_header": "PMCC",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_leap_call",
+        "actions": ["BTO"],
+        "option_types": ["CALL"],
+        "match": {"expiration": "value"},
+        "match_expiration_relation": {"min_days_out_from_created": 170}
+      },
+      {
+        "role": "short_call",
+        "actions": ["STO"],
+        "option_types": ["CALL"],
+        "match": {"strike": "long_leap_call", "expiration": "value"},
+        "match_strike_relation": "equal_or_higher",
+        "match_expiration_relation": {"max_days_out_from_today": 50}
+      }
+    ],
+    "existing_legs": []
+  },
+  {
+    "name": "LEAP_PMCC",
+    "description": "PMCC based on long LEAP call",
+    "group_label": "PMCC",
+    "sheet_header": "PMCC",
+    "requires_existing_group": true,
+    "new_legs": [
+      {
+        "role": "income_short_call_new",
+        "actions": ["STO"],
+        "option_types": ["CALL"],
+        "match": {"strike": "long_leap_call", "expiration": "value"},
+        "match_strike_relation": "equal_or_higher",
+        "match_expiration_relation": {"max_days_out_from_today": 50}
+      }
+    ],
+    "existing_legs": [
+      {
+        "role": "long_leap_call",
+        "actions": ["BTO"],
+        "option_types": ["CALL"],
+        "match": {"expiration": "value"},
+        "match_expiration_relation": {"min_days_out_from_created": 170}
+      }
+    ]
+  },
+  {
+    "name": "NAKED_PUT",
+    "description": "Plain naked put",
+    "group_label": "NAKED PUT",
+    "sheet_header": "NP",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "short_put",
+        "actions": ["STO"],
+        "option_types": ["PUT"]
+      }
+    ],
+    "existing_legs": []
+  },
+  {
+    "name": "NAKED_CALL",
+    "description": "Plain naked call",
+    "group_label": "NAKED CALL",
+    "sheet_header": "NC",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "short_call",
+        "actions": ["STO"],
+        "option_types": ["CALL"]
+      }
+    ],
+    "existing_legs": []
+  },
+  {
+    "name": "STRANGLE",
+    "description": "Strangle",
+    "group_label": "STRANGLE",
+    "sheet_header": "Spec",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "short_put",
+        "actions": ["STO"],
+        "option_types": ["PUT"]
+      },
+      {
+        "role": "short_call",
+        "actions": ["STO"],
+        "option_types": ["CALL"],
+        "match": {"expiration": "short_put", "quantity": "short_put"},
+        "match_expiration_relation": "equal",
+        "match_quantity_relation": "1x"
+      }
+    ],
+    "existing_legs": []
+  },
+  {
+    "name": "CALENDAR_112",
+    "description": "Calendarized 112 put structure",
+    "group_label": "112c",
+    "sheet_header": "112c",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"]
+      },
+      {
+        "role": "short_put_near",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_put", "strike": "long_put", "quantity": "long_put"},
+        "match_strike_relation": "lower",
+        "match_expiration_relation": "equal",
+        "match_quantity_relation": "1x"
+      },
+      {
+        "role": "short_put_far",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "short_put_near", "strike": "short_put_near", "quantity": "short_put_near"},
+        "match_strike_relation": "lower",
+        "match_expiration_relation": "shorter",
+        "match_quantity_relation": "2x"
+      }
+    ],
+    "existing_legs": []
+  },
+  {
+    "name": "1111",
+    "description": "1111 put structure",
+    "group_label": "1111",
+    "sheet_header": "1111",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"]
+      },
+      {
+        "role": "short_put_near",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_put", "strike": "long_put", "quantity": "long_put"},
+        "match_strike_relation": "lower",
+        "match_expiration_relation": "equal",
+        "match_quantity_relation": "1x"
+      },
+      {
+        "role": "short_put_far",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "short_put_near", "strike": "short_put_near", "quantity": "short_put_near"},
+        "match_strike_relation": "lower",
+        "match_expiration_relation": "equal",
+        "match_quantity_relation": "1x"
+      },
+      {
+        "role": "long_put_far",
+        "actions": ["BTO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "short_put_far", "strike": "short_put_far", "quantity": "short_put_far"},
+        "match_strike_relation": "lower",
+        "match_expiration_relation": "equal",
+        "match_quantity_relation": "1x"
+      }
+    ],
+    "existing_legs": []   
+  }
+]

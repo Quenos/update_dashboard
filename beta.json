@@ -33,5 +33,6 @@
     "MSTR": {"ETF_BETA": "100", "SIZE": "100", "ETF": "MSTR"},
     "ONDS": {"ETF_BETA": "100", "SIZE": "100", "ETF": "ONDS"},
     "ETHA": {"ETF_BETA": "100", "SIZE": "100", "ETF": "ETHA"},
-    "USO": {"ETF_BETA": "100", "SIZE": "100", "ETF": "USO"}
+    "USO": {"ETF_BETA": "100", "SIZE": "100", "ETF": "USO"},
+    "BULL": {"ETF_BETA": "100", "SIZE": "100", "ETF": "BULL"}
 }
