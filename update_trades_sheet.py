@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 from tastytrade.account import Transaction
-from tastytrade.order import OrderAction
+from tastytrade.order import InstrumentType, OrderAction
 from trades.trade_history import get_closed_trades, get_opened_trades
 
 from sheets import get_workbook
@@ -28,6 +28,25 @@ logger = logging.getLogger(__name__)
 
 
 LAST_RUN_PATH = "last_run_timestamp.txt"
+
+_EQUITY_SYMBOL_PREFIX = "__EQ__"
+
+
+def _instrument_is_equity(instrument_type: Optional[Any]) -> bool:
+    if isinstance(instrument_type, InstrumentType):
+        return instrument_type == InstrumentType.EQUITY
+    if isinstance(instrument_type, str):
+        return instrument_type.strip().lower() == InstrumentType.EQUITY.value.lower()
+    return False
+
+
+def _make_equity_symbol_key(symbol: Optional[str]) -> Optional[str]:
+    if not isinstance(symbol, str):
+        return None
+    stripped = symbol.strip()
+    if not stripped:
+        return None
+    return f"{_EQUITY_SYMBOL_PREFIX}{stripped.upper()}"
 
 
 def ensure_aware_datetime(value: datetime) -> datetime:
@@ -108,26 +127,34 @@ def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
     removed_rows: List[int] = []
 
     for trade in closed_trades:
-        symbol = trade.symbol
-        if not symbol:
+        raw_symbol = getattr(trade, "symbol", None)
+        symbol_lookup = _make_equity_symbol_key(raw_symbol)
+        if not _instrument_is_equity(getattr(trade, "instrument_type", None)):
+            symbol_lookup = raw_symbol
+
+        if not symbol_lookup:
             logger.warning("Encountered closed trade without OCC symbol; skipping entry")
             continue
 
         target_quantity = _get_trade_quantity(trade)
         remaining_quantity = target_quantity if target_quantity > 0 else Decimal(1)
 
-        rows_info = symbol_to_rows.get(symbol)
+        rows_info = symbol_to_rows.get(symbol_lookup)
         if not rows_info:
             logger.debug(
-                "Symbol %s not found in cached OPEN rows; refreshing cache", symbol
+                "Symbol %s not found in cached OPEN rows; refreshing cache",
+                raw_symbol,
             )
             open_rows, _ = _load_open_sheet_rows(open_sheet)
             symbol_to_rows = _build_open_sheet_symbol_map(open_rows)
             removed_rows = []
-            rows_info = symbol_to_rows.get(symbol)
+            rows_info = symbol_to_rows.get(symbol_lookup)
 
         if not rows_info:
-            logger.warning(f"Could not locate OPEN row for closed trade symbol {symbol!r}")
+            logger.warning(
+                "Could not locate OPEN row for closed trade symbol %r",
+                raw_symbol,
+            )
             continue
 
         moved_quantity = Decimal(0)
@@ -151,7 +178,7 @@ def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
                 )
             except Exception as exc:
                 logger.error(
-                    f"Failed to move row {open_row} for symbol {symbol}: {exc}",
+                    f"Failed to move row {open_row} for symbol {raw_symbol}: {exc}",
                     exc_info=True,
                 )
                 rows_info.insert(0, row_info)
@@ -163,12 +190,12 @@ def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
             bisect.insort(removed_rows, original_row)
 
         if not rows_info:
-            symbol_to_rows.pop(symbol, None)
+            symbol_to_rows.pop(symbol_lookup, None)
 
         if remaining_quantity > 0:
             logger.warning(
                 "Closed trade for %s requires quantity %s but only matched %s",
-                symbol,
+                raw_symbol,
                 target_quantity,
                 moved_quantity,
             )
@@ -249,6 +276,12 @@ def _build_open_sheet_symbol_map(open_rows: List[Dict[str, Any]]) -> Dict[str, L
     mapping: Dict[str, List[Dict[str, Any]]] = {}
     for entry in open_rows:
         symbol = entry.get('occ_symbol')
+        if not symbol:
+            trade_type = entry.get('trade_type', '').upper()
+            ticker = entry.get('ticker') or entry.get('ticker_raw')
+            if trade_type == 'STOCK':
+                symbol = _make_equity_symbol_key(ticker)
+                entry['occ_symbol'] = symbol
         if not symbol:
             continue
         mapping.setdefault(symbol, []).append(entry)
@@ -643,6 +676,9 @@ def _get_trade_quantity(trade: Transaction) -> Decimal:
 
 
 def _parse_trade_transaction(trade: Transaction) -> Optional[Dict[str, Any]]:
+    if _instrument_is_equity(getattr(trade, "instrument_type", None)):
+        return _parse_equity_trade(trade)
+
     occ_symbol = getattr(trade, "symbol", None)
     if not occ_symbol or len(occ_symbol.strip()) < 15:
         return None
@@ -695,6 +731,7 @@ def _parse_trade_transaction(trade: Transaction) -> Optional[Dict[str, Any]]:
 
     return {
         "occ_symbol": occ_symbol,
+        "instrument_type": getattr(trade, "instrument_type", None),
         "ticker": display_ticker.upper(),
         "display_ticker": display_ticker,
         "expiration": expiration,
@@ -714,6 +751,65 @@ def _parse_trade_transaction(trade: Transaction) -> Optional[Dict[str, Any]]:
             action,
             symbol=occ_symbol,
         ),
+    }
+
+
+def _parse_equity_trade(trade: Transaction) -> Optional[Dict[str, Any]]:
+    action = getattr(trade, "action", None)
+    action_code = _action_to_sheet_code(action)
+    if not action_code:
+        return None
+
+    symbol_raw = getattr(trade, "symbol", None)
+    underlying_symbol = getattr(trade, "underlying_symbol", None)
+    display_symbol = symbol_raw if symbol_raw is not None else underlying_symbol
+    if display_symbol is None:
+        logger.warning("Encountered equity trade without symbol information; skipping")
+        return None
+
+    display_text = str(display_symbol)
+    normalized_symbol = display_text.strip()
+    if not normalized_symbol:
+        logger.warning("Encountered equity trade without usable symbol text; skipping")
+        return None
+
+    quantity = _get_trade_quantity(trade)
+    if quantity <= 0:
+        quantity = Decimal(1)
+
+    executed_at = ensure_aware_datetime(
+        getattr(trade, "executed_at", datetime.now(timezone.utc))
+    )
+
+    order_id = getattr(trade, "order_id", None)
+    transaction_id = getattr(trade, "id", None)
+    group_key = str(order_id or transaction_id or normalized_symbol.upper())
+    formatted_price = _format_trade_price(
+        getattr(trade, "price", None),
+        action,
+        symbol=symbol_raw,
+    )
+
+    symbol_key = _make_equity_symbol_key(normalized_symbol or display_text)
+
+    return {
+        "occ_symbol": symbol_key or normalized_symbol.upper(),
+        "instrument_type": getattr(trade, "instrument_type", None),
+        "ticker": normalized_symbol.upper(),
+        "display_ticker": display_text,
+        "expiration": None,
+        "option_type": None,
+        "strike": Decimal(0),
+        "quantity": quantity,
+        "action": action,
+        "action_code": action_code,
+        "order_id": order_id,
+        "transaction_id": transaction_id,
+        "group_key": group_key,
+        "executed_at": executed_at,
+        "created_days_out": None,
+        "current_days_out": None,
+        "open_price": formatted_price,
     }
 
 
@@ -1584,13 +1680,46 @@ def _build_open_sheet_row_values(
     occ_symbol = trade_info.get('occ_symbol')
     thousand_multiplier_required = _requires_thousand_multiplier(occ_symbol)
 
-    if target_row_index is not None and thousand_multiplier_required:
+    if _instrument_is_equity(trade_info.get('instrument_type')):
+        _apply_equity_overrides(values, column_count, target_row_index)
+    elif target_row_index is not None and thousand_multiplier_required:
         if column_count > 12:
             values[12] = f"=H{target_row_index}*K{target_row_index}*1000"
         if column_count > 15:
             values[15] = f"=J{target_row_index}*K{target_row_index}*1000"
     return values
 
+
+def _apply_equity_overrides(
+    values: List[str],
+    column_count: int,
+    target_row_index: Optional[int],
+) -> None:
+    def _set(index: int, value: str) -> None:
+        if column_count > index:
+            values[index] = value
+
+    def _mark(column_index: int) -> None:
+        if column_count > column_index:
+            values[column_index] = '---'
+
+    _mark(4)
+    _mark(6)
+    _mark(11)
+    _mark(18)
+
+    if column_count > 5:
+        values[5] = 'STOCK'
+    if column_count > 20:
+        values[20] = 'STOCK'
+
+    if target_row_index is None:
+        return
+
+    if column_count > 12:
+        values[12] = f"=H{target_row_index}*K{target_row_index}"
+    if column_count > 15:
+        values[15] = f"=J{target_row_index}*K{target_row_index}"
 
 def _extract_formula_map(entry: Dict[str, Any]) -> Dict[int, str]:
     formula_row = entry.get('formulas') or []
