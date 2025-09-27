@@ -74,6 +74,7 @@ def update_dashboard() -> None:
     """
     logger.debug("Starting update_dashboard function")
     try:
+        global market_data
         logger.info("Initializing market data connection")
         market_data = MarketData()
         
