@@ -241,10 +241,20 @@ def get_betas(session: Session) -> Dict[str, Dict[str, str]]:
     """
     try:
         with open("beta.json", "r") as f:
-            betas = json.load(f)
+            beta_data: Dict[str, Dict[str, str]] = json.load(f)
 
-        symbols = list(set(value['ETF'] for value in betas.values()))
-        metrics = get_market_metrics(session, symbols)
+        betas = {
+            symbol: value
+            for symbol, value in beta_data.items()
+            if symbol.startswith("/")
+        }
+
+        if not betas:
+            logger.warning("No beta entries found for symbols starting with '/'")
+            return {}
+
+        symbols = list({value['ETF'] for value in betas.values()})
+        metrics = get_market_metrics(session, symbols) if symbols else []
         for value in betas.values():
             for item in metrics:
                 if value['ETF'] == item.symbol:
@@ -334,7 +344,8 @@ def get_unique_etf_symbols(symbol_map: List[Dict[str, Any]],
     etf_symbols = set()
     for item in symbol_map:
         base_symbol = get_base_symbol(item['symbol'])
-        item['etf'] = betas[base_symbol]['ETF']
+        beta_info = betas.get(base_symbol)
+        item['etf'] = beta_info['ETF'] if beta_info and 'ETF' in beta_info else base_symbol
         etf_symbols.add(item['etf'])
     if SPY_SYMBOL not in etf_symbols:
         etf_symbols.add(SPY_SYMBOL)
@@ -378,8 +389,10 @@ def add_etf_greeks(symbol_map: List[Dict[str, Any]],
         streamer_symbol = item['streamer_symbol']
         if streamer_symbol in greeks:
             base_symbol = get_base_symbol(item['symbol'])
-            beta = Decimal(betas[base_symbol]["ETF_BETA"])
-            size = Decimal(betas[base_symbol]["SIZE"])
+            beta_symbol = betas.get(base_symbol)
+            beta = (Decimal(beta_symbol["ETF_BETA"]) if beta_symbol
+                    else Decimal(100))
+            size = Decimal(beta_symbol["SIZE"]) if beta_symbol else Decimal(100)
             direction = Decimal(1 if item['direction'] == "Long" else -1)
             multiplier = Decimal(item['quantity']) * direction
             item['etf_weighted_delta'] = Decimal(
@@ -408,11 +421,15 @@ def add_spy_beta_delta(symbol_map: List[Dict[str, Any]], greeks: Dict[str, Any],
         streamer_symbol = item['streamer_symbol']
         if streamer_symbol in greeks:
             base_symbol = get_base_symbol(item['symbol'])
-            beta = betas[base_symbol]['SPY_BETA']
+            beta_info = betas.get(base_symbol)
+            beta = beta_info['SPY_BETA'] if beta_info and 'SPY_BETA' in beta_info else base_symbol
             if beta != 'None':
+                etf_weighted_delta = (item['etf_weighted_delta']
+                                      if 'etf_weighted_delta' in item
+                                      else Decimal(100))
                 try:
                     item['beta_weighted_delta'] = Decimal(
-                        item["etf_weighted_delta"]) * Decimal(beta) * Decimal(
+                        etf_weighted_delta) * Decimal(beta) * Decimal(
                         item["current_price_etf"]) / price_spy
                     logger.debug(f"Calculated beta_weighted_delta for {streamer_symbol}: {item['beta_weighted_delta']}")
                 except (ZeroDivisionError, Exception) as e:
@@ -574,6 +591,7 @@ def adjust_formula(formula: str) -> str:
 
 
 def is_closed_today():
+    return False
     logger.debug("Starting is_closed_today function")
     current_year = datetime.now().year
     today = datetime.now().date()
