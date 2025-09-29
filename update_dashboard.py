@@ -591,7 +591,6 @@ def adjust_formula(formula: str) -> str:
 
 
 def is_closed_today():
-    return False
     logger.debug("Starting is_closed_today function")
     current_year = datetime.now().year
     today = datetime.now().date()
