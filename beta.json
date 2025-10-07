@@ -8,7 +8,7 @@
     "/NQ": {"ETF_BETA": "828", "SIZE": "20", "ETF": "QQQ"},
     "/ZB": {"ETF_BETA": "1291", "SIZE": "1000", "ETF": "TLT"},
     "/ZN": {"ETF_BETA": "1181", "SIZE": "1000", "ETF": "IEF"},
-    "/CL": {"ETF_BETA": "1107", "SIZE": "1000", "ETF": "USO"},
+    "/CL": {"ETF_BETA": "846", "SIZE": "1000", "ETF": "USO"},
     "/LE": {"ETF_BETA": "0", "SIZE": "400", "ETF": "NA"},
     "/RTY": {"ETF_BETA": "508", "SIZE": "150", "ETF": "IWM"},
     "/ZS": {"ETF_BETA":  "2365", "SIZE":  "50", "ETF":  "SOYB"},

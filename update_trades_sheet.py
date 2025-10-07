@@ -5,6 +5,7 @@ import bisect
 import logging
 import re
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
@@ -111,7 +112,10 @@ def _try_parse_futures_option_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         "strike": strike_value,
     }
 
-def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
+def update_closed_trades_sheet(
+    closed_trades: List[Transaction],
+    opened_trades: Optional[List[Transaction]] = None,
+) -> None:
     """Move closed trades from OPEN to CLOSED while keeping sheet formulas intact."""
     if not closed_trades:
         logger.debug("No closed trades to apply to CLOSED sheet")
@@ -124,6 +128,7 @@ def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
 
     open_rows, _ = _load_open_sheet_rows(open_sheet)
     symbol_to_rows = _build_open_sheet_symbol_map(open_rows)
+    open_trade_lookup = _build_open_trade_lookup(opened_trades)
     removed_rows: List[int] = []
 
     for trade in closed_trades:
@@ -151,10 +156,33 @@ def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
             rows_info = symbol_to_rows.get(symbol_lookup)
 
         if not rows_info:
-            logger.warning(
-                "Could not locate OPEN row for closed trade symbol %r",
-                raw_symbol,
+            fallback_trade = _pop_open_trade_info(
+                open_trade_lookup,
+                symbol_lookup,
+                trade,
             )
+            if fallback_trade is None:
+                logger.warning(
+                    "Could not locate OPEN row or fallback open trade for closed trade symbol %r",
+                    raw_symbol,
+                )
+                continue
+
+            try:
+                _insert_closed_trade_without_open_row(
+                    closed_sheet,
+                    fallback_trade.parsed,
+                    trade,
+                    column_count=max(1, max_columns),
+                )
+                _remove_consumed_open_trade(opened_trades, fallback_trade.transaction)
+            except Exception as exc:
+                logger.error(
+                    "Failed to insert fallback closed trade for symbol %s: %s",
+                    raw_symbol,
+                    exc,
+                    exc_info=True,
+                )
             continue
 
         moved_quantity = Decimal(0)
@@ -201,6 +229,274 @@ def update_closed_trades_sheet(closed_trades: List[Transaction]) -> None:
             )
 
     _refresh_group_borders(open_sheet)
+
+
+@dataclass
+class FallbackOpenTrade:
+    parsed: Dict[str, Any]
+    transaction: Transaction
+
+
+def _build_open_trade_lookup(
+    opened_trades: Optional[List[Transaction]],
+) -> Dict[str, List[FallbackOpenTrade]]:
+    lookup: Dict[str, List[FallbackOpenTrade]] = {}
+
+    if not opened_trades:
+        return lookup
+
+    for trade in opened_trades:
+        parsed: Optional[Dict[str, Any]]
+        if _instrument_is_equity(getattr(trade, "instrument_type", None)):
+            parsed = _parse_equity_trade(trade)
+        else:
+            parsed = _parse_trade_transaction(trade)
+
+        if not parsed:
+            continue
+
+        symbol_key = parsed.get("occ_symbol")
+        if not symbol_key:
+            continue
+
+        lookup.setdefault(symbol_key, []).append(
+            FallbackOpenTrade(parsed=parsed, transaction=trade)
+        )
+
+    for entries in lookup.values():
+        entries.sort(
+            key=lambda item: item.parsed.get("executed_at") or datetime.min
+        )
+
+    return lookup
+
+
+def _pop_open_trade_info(
+    lookup: Dict[str, List[FallbackOpenTrade]],
+    symbol_key: Optional[str],
+    closed_trade: Transaction,
+) -> Optional[FallbackOpenTrade]:
+    if symbol_key is None:
+        return None
+
+    entries = lookup.get(symbol_key)
+    if not entries:
+        return None
+
+    desired_action: Optional[OrderAction] = None
+    closing_action = getattr(closed_trade, "action", None)
+    if closing_action == OrderAction.BUY_TO_CLOSE:
+        desired_action = OrderAction.SELL_TO_OPEN
+    elif closing_action == OrderAction.SELL_TO_CLOSE:
+        desired_action = OrderAction.BUY_TO_OPEN
+
+    result: Optional[FallbackOpenTrade] = None
+    if desired_action is not None:
+        for index, entry in enumerate(entries):
+            if entry.parsed.get("action") == desired_action:
+                result = entries.pop(index)
+                break
+
+    if result is None:
+        result = entries.pop(0)
+
+    if not entries:
+        lookup.pop(symbol_key, None)
+
+    return result
+
+
+def _remove_consumed_open_trade(
+    opened_trades: Optional[List[Transaction]],
+    consumed_trade: Transaction,
+) -> None:
+    if not opened_trades:
+        return
+
+    for index, candidate in enumerate(opened_trades):
+        if candidate is consumed_trade:
+            opened_trades.pop(index)
+            return
+
+
+def _insert_closed_trade_without_open_row(
+    closed_sheet,
+    open_trade_info: Dict[str, Any],
+    trade: Transaction,
+    *,
+    column_count: int,
+) -> None:
+    destination_row = 2
+    _insert_closed_row_with_template(
+        closed_sheet,
+        destination_row=destination_row,
+        column_count=column_count,
+    )
+    _apply_open_trade_values_to_closed_sheet(
+        closed_sheet,
+        open_trade_info,
+        destination_row,
+        column_count,
+    )
+    _apply_closed_trade_updates(closed_sheet, trade)
+
+
+def _insert_closed_row_with_template(
+    sheet,
+    *,
+    destination_row: int,
+    column_count: int,
+) -> None:
+    requests: List[Dict[str, Any]] = [
+        {
+            "insertDimension": {
+                "range": {
+                    "sheetId": sheet.id,
+                    "dimension": "ROWS",
+                    "startIndex": destination_row - 1,
+                    "endIndex": destination_row,
+                },
+                "inheritFromBefore": False,
+            }
+        }
+    ]
+
+    template_row_index = destination_row + 1
+    total_columns = max(1, column_count)
+
+    if sheet.row_count >= destination_row:
+        requests.extend(
+            [
+                {
+                    "copyPaste": {
+                        "source": {
+                            "sheetId": sheet.id,
+                            "startRowIndex": template_row_index,
+                            "endRowIndex": template_row_index + 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": total_columns,
+                        },
+                        "destination": {
+                            "sheetId": sheet.id,
+                            "startRowIndex": destination_row - 1,
+                            "endRowIndex": destination_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": total_columns,
+                        },
+                        "pasteType": "PASTE_FORMAT",
+                        "pasteOrientation": "NORMAL",
+                    }
+                },
+                {
+                    "copyPaste": {
+                        "source": {
+                            "sheetId": sheet.id,
+                            "startRowIndex": template_row_index,
+                            "endRowIndex": template_row_index + 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": total_columns,
+                        },
+                        "destination": {
+                            "sheetId": sheet.id,
+                            "startRowIndex": destination_row - 1,
+                            "endRowIndex": destination_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": total_columns,
+                        },
+                        "pasteType": "PASTE_FORMULA",
+                        "pasteOrientation": "NORMAL",
+                    }
+                },
+            ]
+        )
+
+    try:
+        sheet.spreadsheet.batch_update({"requests": requests})
+    except Exception as exc:
+        logger.error(
+            "Failed to insert template row on CLOSED sheet: %s",
+            exc,
+            exc_info=True,
+        )
+
+
+def _apply_open_trade_values_to_closed_sheet(
+    sheet,
+    open_trade_info: Dict[str, Any],
+    row_index: int,
+    column_count: int,
+) -> None:
+    values = _build_open_sheet_row_values(
+        open_trade_info,
+        "",
+        column_count,
+        template_formulas=None,
+        row_offset=0,
+        target_row_index=row_index,
+    )
+
+    updates: Dict[int, str] = {}
+    for index, value in enumerate(values):
+        if index >= column_count:
+            break
+        if not value:
+            continue
+        updates[index] = value
+
+    if not updates:
+        return
+
+    _update_closed_sheet_row_cells(sheet, row_index, updates)
+
+
+def _update_closed_sheet_row_cells(
+    sheet,
+    row_index: int,
+    updates: Dict[int, str],
+) -> None:
+    if not updates:
+        return
+
+    sorted_columns = sorted(updates.keys())
+
+    current_group: List[int] = []
+    for column_index in sorted_columns:
+        if not current_group:
+            current_group.append(column_index)
+            continue
+        if column_index == current_group[-1] + 1:
+            current_group.append(column_index)
+            continue
+        _commit_closed_sheet_group(sheet, row_index, current_group, updates)
+        current_group = [column_index]
+
+    if current_group:
+        _commit_closed_sheet_group(sheet, row_index, current_group, updates)
+
+
+def _commit_closed_sheet_group(
+    sheet,
+    row_index: int,
+    columns: List[int],
+    updates: Dict[int, str],
+) -> None:
+    start_column = columns[0] + 1
+    end_column = columns[-1] + 1
+    range_label = (
+        f"{_column_letter(start_column)}{row_index}:{_column_letter(end_column)}{row_index}"
+        if start_column != end_column
+        else f"{_column_letter(start_column)}{row_index}"
+    )
+    values = [[updates[column] for column in columns]]
+    try:
+        sheet.update(values, range_label, value_input_option="USER_ENTERED")
+    except Exception as exc:
+        logger.error(
+            "Failed to update CLOSED sheet range %s: %s",
+            range_label,
+            exc,
+            exc_info=True,
+        )
 
 def fetch_recent_trades(account, session, *, timestamp_path: str = LAST_RUN_PATH) -> tuple[list[Transaction], list[Transaction]]:
     """Fetch opened and closed trades based on the last run timestamp."""
@@ -1682,11 +1978,12 @@ def _build_open_sheet_row_values(
 
     if _instrument_is_equity(trade_info.get('instrument_type')):
         _apply_equity_overrides(values, column_count, target_row_index)
-    elif target_row_index is not None and thousand_multiplier_required:
+    elif target_row_index is not None:
+        multiplier_value = "1000" if thousand_multiplier_required else "100"
         if column_count > 12:
-            values[12] = f"=H{target_row_index}*K{target_row_index}*1000"
+            values[12] = f"=H{target_row_index}*K{target_row_index}*{multiplier_value}"
         if column_count > 15:
-            values[15] = f"=J{target_row_index}*K{target_row_index}*1000"
+            values[15] = f"=J{target_row_index}*K{target_row_index}*{multiplier_value}"
     return values
 
 

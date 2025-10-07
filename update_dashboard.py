@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import pandas_market_calendars as mcal
-from tastytrade.instruments import FutureOption, Option
+from tastytrade.instruments import Equity, FutureOption, Option
 from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType
 from tastytrade.session import Session
@@ -196,7 +196,7 @@ def get_portfolio_metrics(session: Session, account: Account) -> Tuple[Decimal, 
     logger.debug(f"Added current prices, SPY price: {price_spy}")
     
     logger.debug("Getting Greeks data")
-    greeks = get_greeks(symbol_map)
+    greeks = get_greeks([symbols for symbols in symbol_map if symbols['streamer_symbol'].startswith('.')])
     logger.debug(f"Retrieved Greeks for {len(greeks)} symbols")
     
     logger.debug("Adding ETF Greeks to symbol map")
@@ -232,7 +232,7 @@ def get_filtered_positions(account: Account, session: Session) -> List[Any]:
     Retrieves positions, filtering out equity positions.
     """
     positions = account.get_positions(session)
-    return [x for x in positions if x.instrument_type != InstrumentType.EQUITY and x.instrument_type != InstrumentType.CRYPTOCURRENCY]
+    return [x for x in positions if x.instrument_type != InstrumentType.CRYPTOCURRENCY]
 
 
 def get_betas(session: Session) -> Dict[str, Dict[str, str]]:
@@ -296,6 +296,8 @@ def get_option_for_position(session: Session, position: Any) -> Any:
         return FutureOption.get(session, position.symbol)
     elif position.instrument_type == InstrumentType.EQUITY_OPTION:
         return Option.get(session, position.symbol)
+    elif position.instrument_type == InstrumentType.EQUITY:
+        return Equity.get(session, position.symbol)
     else:
         raise ValueError(f"Unknown instrument type: {position.instrument_type}")
 
@@ -419,25 +421,28 @@ def add_spy_beta_delta(symbol_map: List[Dict[str, Any]], greeks: Dict[str, Any],
     
     for item in symbol_map:
         streamer_symbol = item['streamer_symbol']
-        if streamer_symbol in greeks:
-            base_symbol = get_base_symbol(item['symbol'])
-            beta_info = betas.get(base_symbol)
-            beta = beta_info['SPY_BETA'] if beta_info and 'SPY_BETA' in beta_info else base_symbol
-            if beta != 'None':
-                etf_weighted_delta = (item['etf_weighted_delta']
-                                      if 'etf_weighted_delta' in item
-                                      else Decimal(100))
-                try:
+        base_symbol = get_base_symbol(item['symbol'])
+        beta = get_market_metrics(ApplicationSession().session, [base_symbol])[0].beta
+        if beta != 'None':
+            etf_weighted_delta = (item['etf_weighted_delta']
+                                  if 'etf_weighted_delta' in item
+                                  else Decimal(100))
+            try:
+                if item['streamer_symbol'].startswith('.'):
                     item['beta_weighted_delta'] = Decimal(
                         etf_weighted_delta) * Decimal(beta) * Decimal(
                         item["current_price_etf"]) / price_spy
-                    logger.debug(f"Calculated beta_weighted_delta for {streamer_symbol}: {item['beta_weighted_delta']}")
-                except (ZeroDivisionError, Exception) as e:
-                    logger.error(f"Error calculating beta_weighted_delta for {streamer_symbol}: {e}")
-                    item['beta_weighted_delta'] = Decimal(0)
-            else:
+                else:
+                    item['beta_weighted_delta'] = Decimal(
+                        item['quantity']) * Decimal(beta) * Decimal(
+                        item["current_price_etf"]) / price_spy
+                logger.debug(f"Calculated beta_weighted_delta for {streamer_symbol}: {item['beta_weighted_delta']}")
+            except (ZeroDivisionError, Exception) as e:
+                logger.error(f"Error calculating beta_weighted_delta for {streamer_symbol}: {e}")
                 item['beta_weighted_delta'] = Decimal(0)
-                logger.debug(f"No beta available for {streamer_symbol}, setting beta_weighted_delta to 0")
+        else:
+            item['beta_weighted_delta'] = Decimal(0)
+            logger.debug(f"No beta available for {streamer_symbol}, setting beta_weighted_delta to 0")
     return symbol_map
 
 

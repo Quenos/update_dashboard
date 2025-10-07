@@ -256,5 +256,101 @@
       }
     ],
     "existing_legs": []   
+  },
+  {
+    "name": "Calendar new",
+    "description": "Calendar put structure",
+    "group_label": "CALENDAR",
+    "sheet_header": "Calendar",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"]
+      },
+      {
+        "role": "short_put_near",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "long_put", "strike": "long_put", "quantity": "long_put"},
+        "match_strike_relation": "equal",
+        "match_expiration_relation": "shorter",        
+        "match_quantity_relation": "1x"
+      }
+    ],
+    "existing_legs": []   
+  },
+  {
+    "name": "Diagonal new",
+    "description": "Diagonal put structure",
+    "group_label": "DIAGONAL",
+    "sheet_header": "Diagonal",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"]
+      },
+      {
+        "role": "short_put_near",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "value", "strike": "long_put", "quantity": "long_put"},
+        "match_strike_relation": "higher",
+        "match_expiration_relation": {"max_days_out_from_today": 10},        
+        "match_quantity_relation": "1x"
+      }
+    ],
+    "existing_legs": []   
+  },
+  {
+    "name": "Jade Lizzard",
+    "description": "Jade Lizzard",
+    "group_label": "JADE LIZZARD",
+    "sheet_header": "Jade Lizzard",
+    "requires_existing_group": false,
+    "new_legs": [
+      {
+        "role": "long_call",
+        "actions": ["BTO"],
+        "option_types": ["CALL"]
+      },
+      {
+        "role": "short_call",
+        "actions": ["STO"],
+        "option_types": ["CALL"],
+        "match": {"strike": "long_call", "quantity": "long_call"},
+        "match_strike_relation": "lower",
+        "match_quantity_relation": "1x"
+      }
+    ],
+    "existing_legs": []   
+  },
+  {
+    "name": "Diagonal",
+    "description": "Diagonal put structure",
+    "group_label": "DIAGONAL",
+    "sheet_header": "Diagonal",
+    "requires_existing_group": true,
+    "new_legs": [
+      {
+        "role": "short_put_near",
+        "actions": ["STO"],
+        "option_types": ["PUT"],
+        "match": {"expiration": "value", "strike": "long_put", "quantity": "long_put"},
+        "match_strike_relation": "higher",
+        "match_quantity_relation": "1x",
+        "match_expiration_relation": {"max_days_out_from_today": 10}
+      }
+    ],
+    "existing_legs": [
+      {
+        "role": "long_put",
+        "actions": ["BTO"],
+        "option_types": ["PUT"]
+      }
+    ]
   }
 ]
