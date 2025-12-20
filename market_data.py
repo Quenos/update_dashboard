@@ -1,122 +1,10 @@
 import asyncio
-from dataclasses import dataclass, field
-from enum import Enum
-from threading import Thread, Event, Lock, current_thread
-
-from typing import Any, ClassVar, Dict, List, Optional, Iterable
-
-from tastytrade.streamer import DXLinkStreamer, Greeks, Quote, Trade
-
+from threading import Event, Lock, Thread
+from typing import Dict, Iterable, Optional, Any
 from session import ApplicationSession
 
-
-class EventType(str, Enum):
-    GREEKS = 'Greeks'
-    TRADE = 'Trade'
-    QUOTE = 'Quote'
-
-@dataclass
-class MarketData():
-    database: Any = field(init=True, default=None)
-
-    # singleton class
-    _instance: ClassVar['MarketData'] = None
-
-    _subscribed_symbols: Dict[str, List[str]] = field(init=False, default_factory=dict) 
-    _new_symbols: Dict[str, List[str]] = field(init=False, default_factory=dict) 
-    _cached_events: Dict[str, Dict[str, Any]] = field(init=False, default_factory=dict) 
-    _stop_streaming: bool = field(init=False, default=False)
-    _thread_runs: bool = field(init=False, default=False)
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(MarketData, cls).__new__(cls)
-        return cls._instance
-
-    def __post_init__(self):
-        if not hasattr(self, '_initialized'):
-            self._new_symbols[EventType.GREEKS] = []
-            self._new_symbols[EventType.TRADE] = []
-            self._new_symbols[EventType.QUOTE] = []
-            self._subscribed_symbols[EventType.GREEKS] = []
-            self._subscribed_symbols[EventType.TRADE] = []
-            self._subscribed_symbols[EventType.QUOTE] = []
-            self._cached_events[EventType.GREEKS] = {}
-            self._cached_events[EventType.TRADE] = {}
-            self._cached_events[EventType.QUOTE] = {}
-
-    def subscribe_greeks(self, symbols: list[str]) -> List[Greeks] | None:
-        return self._subscribe_symbol(EventType.GREEKS, symbols)
-
-    def subscribe_trades(self, symbols: list[str]) -> List[Trade] | None:
-        return self._subscribe_symbol(EventType.TRADE, symbols)
-    
-    def subscribe_quotes(self, symbols: list[str]) -> Quote:
-        return self._subscribe_symbol(EventType.QUOTE, symbols)
-    
-    def get_greeks(self, symbols: list[str]) -> List[Greeks] | None:
-        return self._get_events(EventType.GREEKS, symbols)
-
-    def get_trades(self, symbols: list[str]) -> List[Trade] | None:
-        return self._get_events(EventType.TRADE, symbols)
-    
-    def get_quotes(self, symbols: list[str]) -> Quote:
-        return self._get_events(EventType.QUOTE, symbols)
-
-    def start_streamer(self) -> None:
-        if self._thread_runs:
-            return
-        self._thread_runs = True
-        thread = Thread(target=self._streamer_thread, daemon=True)
-        thread.start()
-
-    def stop_streamer(self) -> None:
-        self._stop_streaming = True
-        self._thread_runs = False
-
-    def _subscribe_symbol(self, event_type: EventType, symbols: List[str]) -> None:
-        new_symbols = list(set(symbols) - set(self._subscribed_symbols[event_type]))
-        if new_symbols:
-            self._new_symbols[event_type] = new_symbols
-            self._subscribed_symbols[event_type] = list(set(self._subscribed_symbols[event_type]) | set(symbols))
-
-    def _get_events(self, event_type: EventType, symbols: List[str]) -> List[Greeks] | List[Trade] | List[Quote] | None:
-        market_data = list(self._cached_events[event_type].values())
-        market_data = [data for data in market_data if data.event_symbol in symbols]
-        return market_data
-
-    async def _fetch_data(self, event_type: EventType) -> None:
-        event_type_map = {
-            EventType.GREEKS: Greeks,
-            EventType.TRADE: Trade,
-            EventType.QUOTE: Quote
-        }
-        session = ApplicationSession().session
-        async with DXLinkStreamer(session) as streamer:
-            streamer.fill_event_time = True
-            if self.database and not streamer.database:
-                streamer.database = self.database
-            while not self._stop_streaming:
-                if self._new_symbols[event_type]:
-                    await streamer.subscribe(event_type_map[event_type], symbols=self._new_symbols[event_type])
-                    self._new_symbols[event_type] = []
-                if self.database:
-                    await asyncio.sleep(10)
-                    continue
-                event = streamer.get_event_nowait(event_type_map[event_type])
-                if event:
-                    self._cached_events[event_type][event.event_symbol] = event
-                await asyncio.sleep(0.1)
-
-    async def _start_streamers(self) -> None:
-        await asyncio.gather(
-            self._fetch_data(EventType.QUOTE),
-            self._fetch_data(EventType.TRADE),
-            self._fetch_data(EventType.GREEKS)
-        )
-
-    def _streamer_thread(self) -> None:
-        asyncio.run(self._start_streamers())
+from tastytrade import DXLinkStreamer
+from tastytrade.dxfeed import Trade, Quote, Greeks
 
 
 class MarketDataStreamer:
@@ -144,10 +32,10 @@ class MarketDataStreamer:
         self._data_lock = Lock()
         self._symbol_lock = Lock()
 
-        # optional: capture startup exception so start() can raise it
+        # startup error capture
         self._startup_exc: Optional[BaseException] = None
 
-    # ----------- thread-safe snapshots (read side) -----------
+    # ----------- thread-safe snapshots -----------
 
     @property
     def trades(self) -> Dict[str, Trade]:
@@ -164,7 +52,7 @@ class MarketDataStreamer:
         with self._data_lock:
             return dict(self._greeks)
 
-    # ----------- non-async subscription API -----------
+    # ----------- non-async subscription API (add-only) -----------
 
     def subscribe_to_trades(self, symbols: Iterable[str]) -> None:
         self._subscribe_non_async(Trade, symbols, which="trade")
@@ -176,12 +64,6 @@ class MarketDataStreamer:
         self._subscribe_non_async(Greeks, symbols, which="greek")
 
     def _subscribe_non_async(self, event_cls: type, symbols: Iterable[str], which: str) -> None:
-        # if not running yet, initial connect will pick them up
-        is_stopped = False
-        if self.is_running():
-            self.stop()
-            is_stopped = True
-
         symbols_set = set(symbols)
         if not symbols_set:
             return
@@ -205,15 +87,13 @@ class MarketDataStreamer:
             else:
                 raise ValueError("unknown subscription type")
 
-        if is_stopped:
-            self.start()
+        # Not running yet: startup will subscribe from the sets
+        if not self._ready.is_set() or self._loop is None or self.streamer is None:
+            return
 
-    def is_running(self) -> bool:
-        return (
-            self._thread is not None
-            and self._thread.is_alive()
-            and self._loop is not None
-        )
+        # Running: schedule subscribe onto the streamer's loop (non-blocking)
+        asyncio.run_coroutine_threadsafe(self._subscribe_more(event_cls, list(new)), self._loop)
+
     # ----------- async internals -----------
 
     async def _connect_and_subscribe(self) -> None:
@@ -233,42 +113,19 @@ class MarketDataStreamer:
 
     async def handle_trades(self) -> None:
         assert self.streamer is not None
-        agen = self.streamer.listen(Trade)
-        try:
-            async for trade in agen:
-                with self._data_lock:
-                    self._trades[trade.event_symbol] = trade
-        except asyncio.CancelledError:
-            # let us cleanly close the async generator
-            raise
-        finally:
-            await agen.aclose()
+        async for trade in self.streamer.listen(Trade):
+            with self._data_lock:
+                self._trades[trade.event_symbol] = trade
 
     async def handle_quotes(self) -> None:
         assert self.streamer is not None
-        agen = self.streamer.listen(Quote)
-        try:
-            async for quote in agen:
-                with self._data_lock:
-                    self._quotes[quote.event_symbol] = quote
-        except asyncio.CancelledError:
-            # let us cleanly close the async generator
-            raise
-        finally:
-            await agen.aclose()
+        async for quote in self.streamer.listen(Quote):
+            with self._data_lock:
+                self._quotes[quote.event_symbol] = quote
 
     async def handle_greeks(self) -> None:
         assert self.streamer is not None
-        agen = self.streamer.listen(Greeks)
-        try:
-            async for greeks in agen:
-                with self._data_lock:
-                    self._greeks[greeks.event_symbol] = greeks
-        except asyncio.CancelledError:
-            # let us cleanly close the async generator
-            raise
-        finally:
-            await agen.aclose()
+        async for greeks in self.streamer.listen(Greeks):
             with self._data_lock:
                 self._greeks[greeks.event_symbol] = greeks
 
@@ -276,31 +133,33 @@ class MarketDataStreamer:
         try:
             await self._connect_and_subscribe()
 
-            self._tasks = []
-            if self._trade_symbols:
-                self._tasks.append(asyncio.create_task(self.handle_trades()))
-            if self._quote_symbols:
-                self._tasks.append(asyncio.create_task(self.handle_quotes()))
-            if self._greek_symbols:
-                self._tasks.append(asyncio.create_task(self.handle_greeks()))
+            # IMPORTANT: start consumers even if no symbols yet
+            self._tasks = [
+                asyncio.create_task(self.handle_trades()),
+                asyncio.create_task(self.handle_quotes()),
+                asyncio.create_task(self.handle_greeks()),
+            ]
 
         except BaseException as e:
             self._startup_exc = e
             raise
         finally:
-            # Always release start() even if startup fails
             self._ready.set()
 
+        # cancellation-safe shutdown
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    async def _subscribe_more(self, event_cls: type, symbols: list[str]) -> None:
+        if self.streamer is None or not symbols:
+            return
+        await self.streamer.subscribe(event_cls, symbols)
+
     async def _stop_async(self) -> None:
-        # cancel consumers
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
-        # close streamer
         if self.streamer is not None:
             await self.streamer.close()
             self.streamer = None
@@ -317,40 +176,11 @@ class MarketDataStreamer:
         def runner() -> None:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-
-            main_task = self._loop.create_task(self._run())
-            self._main_task = main_task
-
             try:
-                self._loop.run_until_complete(main_task)
-            except asyncio.CancelledError:
-                pass
+                self._loop.run_until_complete(self._run())
             finally:
-                loop = self._loop
-                if loop is None or loop.is_closed():
-                    return
+                self._loop.close()
 
-                # 1) Cancel anything still pending
-                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                for t in pending:
-                    t.cancel()
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-
-                # 2) IMPORTANT: finish async-generator finalizers (fixes async_generator_athrow)
-                loop.run_until_complete(loop.shutdown_asyncgens())
-
-                # 3) (Optional but good) shutdown executor threads cleanly
-                loop.run_until_complete(loop.shutdown_default_executor())
-
-                loop.close()
-
-        loop = self._loop
-        if loop is not None and not loop.is_closed():
-            pending = asyncio.all_tasks(loop)
-            for t in pending:
-                t.cancel()
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            loop.close()
         self._thread = Thread(target=runner, daemon=True)
         self._thread.start()
 
@@ -360,24 +190,19 @@ class MarketDataStreamer:
 
     def stop(self) -> None:
         loop = self._loop
-        thread = self._thread
-        if loop is None:
+        if loop is None or loop.is_closed():
             return
 
-        # schedule async cleanup (optional but good)
+        fut = asyncio.run_coroutine_threadsafe(self._stop_async(), loop)
+        fut.result()
+
         try:
-            asyncio.run_coroutine_threadsafe(self._stop_async(), loop)
+            loop.call_soon_threadsafe(loop.stop)
         except RuntimeError:
             pass
 
-        # cancel the main task so run_until_complete can finish cleanly
-        main_task = getattr(self, "_main_task", None)
-        if main_task is not None and not main_task.done():
-            loop.call_soon_threadsafe(main_task.cancel)
-
-        # join from non-loop thread
-        if thread and thread.is_alive() and current_thread() is not thread:
-            thread.join(timeout=10)
+        if self._thread:
+            self._thread.join(timeout=10)
 
         self._loop = None
         self._thread = None

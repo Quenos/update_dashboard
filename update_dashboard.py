@@ -6,23 +6,22 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Tuple
 
-import pandas as pd
-import pandas_market_calendars as mcal
 from tastytrade.instruments import Equity, FutureOption, Option
 from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType
 from tastytrade.session import Session
+from tastytrade.utils import is_market_open_on
 
 from account import Account
 from config import GREEK_POLL_INTERVAL
-from market_data import MarketData
+from market_data import MarketDataStreamer
 from session import ApplicationSession
 from sheets import get_row_data, get_workbook, insert_row_data
 
 
 logger = logging.getLogger(__name__)
 
-market_data: MarketData | None = None
+market_data_streamer: MarketDataStreamer | None = None
 SPY_SYMBOL = 'SPY'
 
 
@@ -72,17 +71,14 @@ def update_dashboard() -> None:
     """
     Updates the dashboard sheet in the tracker workbook with new data.
     """
+    global market_data_streamer
+
     logger.debug("Starting update_dashboard function")
     try:
-        global market_data
-        logger.info("Initializing market data connection")
-        market_data = MarketData()
-        
-        logger.info("Starting market data streamer")
-        market_data.start_streamer()
         
         logger.info("Checking if exchanges are open today")
-        if is_closed_today():
+        today = datetime.now().date()
+        if not is_market_open_on(today):
             logger.info("Exchanges are closed - exiting")
             return
 
@@ -94,6 +90,9 @@ def update_dashboard() -> None:
         account = Account(session).account
         logger.debug(f"Account retrieved: {account.account_number if hasattr(account, 'account_number') else 'Unknown'}")
 
+        logger.debug("Initializing market data streamer")
+        market_data_streamer = MarketDataStreamer(session)
+        
         logger.debug("Fetching portfolio data")
         portfolio_data = get_portfolio_data(session, account)
         logger.debug(f"Portfolio data retrieved: {len(portfolio_data) if portfolio_data else 0} items")
@@ -307,17 +306,18 @@ def add_current_prices(session: Session, symbol_map: List[Dict[str, Any]],
     """
     Adds current prices to the symbol map and returns the SPY price.
     """
-    global market_data
+    global market_data_streamer
 
     etf_symbols = get_unique_etf_symbols(symbol_map, betas)
     logger.debug(f"Subscribing to trades for {len(etf_symbols)} symbols: {etf_symbols}")
-    market_data.subscribe_trades(etf_symbols)
+    market_data_streamer.subscribe_to_trades(etf_symbols)
+    market_data_streamer.start()
     
     # Wait for streamer to receive data
     logger.debug("Waiting for streamer to receive trade data...")
     time.sleep(2)  # Give streamer time to receive data
     
-    current_prices = market_data.get_trades(etf_symbols)
+    current_prices = list(market_data_streamer.trades.values())
     logger.debug(f"Retrieved {len(current_prices)} trade prices from streamer")
 
     for item in symbol_map:
@@ -368,16 +368,22 @@ def get_greeks(symbol_map: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Retrieves Greek values for the symbols in the symbol map.
     """
-    global market_data
+
+    global market_data_streamer
+
     symbols = [x['streamer_symbol'] for x in symbol_map]
-    market_data.subscribe_greeks(symbols)
+    market_data_streamer.subscribe_to_greeks(symbols)
     greeks = []
-    while symbols:
-        greeks.extend(market_data.get_greeks(symbols))
-        symbols = [symbol for symbol in symbols
-                   if symbol not in [greek.event_symbol for greek in greeks]]
+    keys_set = set(symbols)
+
+    while True:
         time.sleep(GREEK_POLL_INTERVAL)
-        logger.debug(f"Waiting for greeks: {symbols}")
+        missing = keys_set - market_data_streamer.greeks.keys()
+        if not missing:
+            greeks = list(market_data_streamer.greeks.values())
+            break
+
+        logger.debug(f"Waiting for: {len(missing)} symbols: {missing}")
     return {obj.event_symbol: obj for obj in greeks}
 
 
@@ -593,31 +599,3 @@ def adjust_formula(formula: str) -> str:
         return match.group(1) + str(int(match.group(2)) - 1)
 
     return re.sub(r'([A-Z]+)(\d+)', decrement, formula)
-
-
-def is_closed_today():
-    logger.debug("Starting is_closed_today function")
-    current_year = datetime.now().year
-    today = datetime.now().date()
-    logger.debug(f"Checking if exchanges are closed for today: {today} (year: {current_year})")
-    
-    logger.debug("Getting NYSE calendar")
-    nyse = mcal.get_calendar('NYSE')
-    
-    logger.debug(f"Getting NYSE schedule for {current_year}")
-    schedule = nyse.schedule(start_date=f"{current_year}-01-01",
-                             end_date=f"{current_year}-12-31")
-    logger.debug(f"NYSE schedule has {len(schedule)} trading days")
-    
-    logger.debug(f"Creating date range for all days in {current_year}")
-    all_days = pd.date_range(start=f"{current_year}-01-01",
-                             end=f"{current_year}-12-31")
-    logger.debug(f"All days range has {len(all_days)} days")
-
-    trading_days = schedule.index
-    holidays = all_days.difference(trading_days)
-    logger.debug(f"Found {len(holidays)} non-trading days")
-
-    is_closed = today in holidays.date
-    logger.debug(f"Is today a non-trading day? {is_closed}")
-    return is_closed
